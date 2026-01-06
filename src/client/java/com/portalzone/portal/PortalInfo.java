@@ -17,6 +17,7 @@ public class PortalInfo {
     public final ResourceKey<Level> dimension;
     public final UUID uuid;
     public final Vector3f color;
+    private final float baseHue;
     public final Axis orientation;
 
     // Portal dimensions
@@ -37,7 +38,8 @@ public class PortalInfo {
         // Generate UUID based on position and dimension
         // This ensures the same portal always has the same UUID and color
         this.uuid = generateUUID(position, dimension);
-        this.color = generateColor(uuid);
+        this.baseHue = generateHue(uuid);
+        this.color = colorFromHue(baseHue);
     }
 
     /**
@@ -77,6 +79,13 @@ public class PortalInfo {
     }
 
     /**
+     * Get the default hue for this portal (based on UUID)
+     */
+    public float getBaseHue() {
+        return baseHue;
+    }
+
+    /**
      * Generate a consistent UUID for this portal based on its position and dimension
      */
     private static UUID generateUUID(BlockPos pos, ResourceKey<Level> dimension) {
@@ -86,15 +95,20 @@ public class PortalInfo {
     }
 
     /**
-     * Generate a random color based on UUID
+     * Generate a consistent hue based on UUID
      */
-    private static Vector3f generateColor(UUID uuid) {
-        // Use UUID bytes to generate a vibrant color
+    private static float generateHue(UUID uuid) {
+        // Use UUID bytes to generate a vibrant hue
         long bits = uuid.getMostSignificantBits();
 
         // Extract hue from UUID
-        float hue = ((bits & 0xFFFF) / 65535.0f) * 360.0f;
+        return ((bits & 0xFFFF) / 65535.0f) * 360.0f;
+    }
 
+    /**
+     * Convert a hue to an RGB color (HSV with fixed saturation/value)
+     */
+    public static Vector3f colorFromHue(float hue) {
         // Use HSV to RGB conversion for vibrant colors
         // Saturation = 0.8, Value = 1.0 for bright colors
         float saturation = 0.8f;

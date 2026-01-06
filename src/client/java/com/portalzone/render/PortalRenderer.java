@@ -80,7 +80,7 @@ public class PortalRenderer {
         float size = calculateBillboardSize(distance, MARKER_SIZE);
 
         // Get color
-        Vector3f color = portal.color;
+        Vector3f color = PortalManager.getInstance().getPortalColor(portal);
 
         // Use world position directly (PoseStack is already camera-relative)
         Vec3 pos = worldPos;
@@ -105,7 +105,7 @@ public class PortalRenderer {
         float size = calculateBillboardSize(distance, MARKER_SIZE);
 
         // Get color
-        Vector3f color = portal.color;
+        Vector3f color = PortalManager.getInstance().getPortalColor(portal);
 
         // Use world position directly (PoseStack is already camera-relative)
         Vec3 pos = translatedPos;

@@ -1,10 +1,10 @@
 package com.portalzone.gui;
 
-import com.mojang.blaze3d.vertex.PoseStack;
 import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
@@ -15,13 +15,15 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * GUI screen for managing portal names
  */
 public class PortalManagementScreen extends Screen {
-    private static final int ENTRY_HEIGHT = 24;
-    private static final int ENTRY_SPACING = 4;
+    private static final int ENTRY_HEIGHT = 46;
+    private static final int ENTRY_SPACING = 6;
+    private static final int SLIDER_OFFSET_Y = 22;
     private static final int SCROLL_SPEED = 10;
 
     private final Screen parent;
@@ -87,6 +89,10 @@ public class PortalManagementScreen extends Screen {
                 manager.setPortalName(entry.portal.uuid, text);
             });
             this.addRenderableWidget(entry.editBox);
+            float hue = manager.getPortalHue(entry.portal);
+            entry.hueSlider = new HueSlider(this.width / 2 + 50, y + SLIDER_OFFSET_Y, 200, 20,
+                entry.portal.uuid, hue);
+            this.addRenderableWidget(entry.hueSlider);
             y += ENTRY_HEIGHT + ENTRY_SPACING;
         }
     }
@@ -119,9 +125,12 @@ public class PortalManagementScreen extends Screen {
         if (entry.editBox != null) {
             entry.editBox.setY(y);
         }
+        if (entry.hueSlider != null) {
+            entry.hueSlider.setY(y + SLIDER_OFFSET_Y);
+        }
 
         // Draw color indicator
-        Vector3f color = entry.portal.color;
+        Vector3f color = PortalManager.getInstance().getPortalColor(entry.portal);
         int colorInt = 0xFF000000 |
                 ((int)(color.x * 255) << 16) |
                 ((int)(color.y * 255) << 8) |
@@ -156,6 +165,7 @@ public class PortalManagementScreen extends Screen {
     @Override
     public void removed() {
         super.removed();
+        PortalManager.getInstance().saveSettingsNow();
     }
 
     @Override
@@ -168,11 +178,35 @@ public class PortalManagementScreen extends Screen {
         final ResourceKey<Level> dimension;
         final boolean isCurrentDimension;
         EditBox editBox;
+        HueSlider hueSlider;
 
         PortalEntry(PortalInfo portal, ResourceKey<Level> dimension, boolean isCurrentDimension) {
             this.portal = portal;
             this.dimension = dimension;
             this.isCurrentDimension = isCurrentDimension;
+        }
+    }
+
+    private static class HueSlider extends AbstractSliderButton {
+        private static final float MAX_HUE = 360.0f;
+        private final UUID portalUuid;
+
+        HueSlider(int x, int y, int width, int height, UUID portalUuid, float hue) {
+            super(x, y, width, height, Component.empty(), hue / MAX_HUE);
+            this.portalUuid = portalUuid;
+            updateMessage();
+        }
+
+        @Override
+        protected void updateMessage() {
+            int hueValue = Math.round((float)(this.value * MAX_HUE));
+            this.setMessage(Component.translatable("gui.portal-zone-visualizer.hue", hueValue));
+        }
+
+        @Override
+        protected void applyValue() {
+            float hueValue = (float)(this.value * MAX_HUE);
+            PortalManager.getInstance().setPortalHue(portalUuid, hueValue);
         }
     }
 }

@@ -1,5 +1,11 @@
 package com.portalzone.portal;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
@@ -11,15 +17,23 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.NetherPortalBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import org.joml.Vector3f;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * Manages portal detection and tracking across dimensions
  */
 public class PortalManager {
     private static final PortalManager INSTANCE = new PortalManager();
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final String CONFIG_FILE = "portal-zone-visualizer.json";
+
+    private final Path configPath;
 
     // Store portals by dimension
     private final Map<ResourceKey<Level>, Set<PortalInfo>> portalsByDimension = new ConcurrentHashMap<>();
@@ -33,7 +47,12 @@ public class PortalManager {
     // Store custom names for portals (persistent across rescans)
     private final Map<UUID, String> portalNames = new ConcurrentHashMap<>();
 
+    // Store custom hues for portals (persistent across rescans)
+    private final Map<UUID, Float> portalHues = new ConcurrentHashMap<>();
+
     private PortalManager() {
+        this.configPath = FabricLoader.getInstance().getConfigDir().resolve(CONFIG_FILE);
+        loadSettings();
     }
 
     public static PortalManager getInstance() {
@@ -385,6 +404,7 @@ public class PortalManager {
         portalsByDimension.clear();
         scannedChunks.clear();
         portalNames.clear();
+        portalHues.clear();
         portalsChanged = true;
     }
 
@@ -412,6 +432,79 @@ public class PortalManager {
     public String getPortalDisplayName(PortalInfo portal) {
         String customName = portalNames.get(portal.uuid);
         return customName != null ? customName : portal.getShortId();
+    }
+
+    /**
+     * Set a custom hue for a portal
+     */
+    public void setPortalHue(UUID portalUuid, float hue) {
+        float clamped = Math.max(0.0f, Math.min(360.0f, hue));
+        portalHues.put(portalUuid, clamped);
+        portalsChanged = true;
+    }
+
+    /**
+     * Get the hue for a portal (custom hue if set, otherwise default)
+     */
+    public float getPortalHue(PortalInfo portal) {
+        Float custom = portalHues.get(portal.uuid);
+        return custom != null ? custom : portal.getBaseHue();
+    }
+
+    /**
+     * Get the color for a portal (custom hue if set, otherwise default)
+     */
+    public Vector3f getPortalColor(PortalInfo portal) {
+        return PortalInfo.colorFromHue(getPortalHue(portal));
+    }
+
+    private void loadSettings() {
+        if (!Files.exists(configPath)) {
+            return;
+        }
+
+        try (var reader = Files.newBufferedReader(configPath, StandardCharsets.UTF_8)) {
+            JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+            JsonObject names = root.getAsJsonObject("portalNames");
+            if (names != null) {
+                for (Map.Entry<String, JsonElement> entry : names.entrySet()) {
+                    portalNames.put(UUID.fromString(entry.getKey()), entry.getValue().getAsString());
+                }
+            }
+
+            JsonObject hues = root.getAsJsonObject("portalHues");
+            if (hues != null) {
+                for (Map.Entry<String, JsonElement> entry : hues.entrySet()) {
+                    portalHues.put(UUID.fromString(entry.getKey()), entry.getValue().getAsFloat());
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[PortalZoneVisualizer] Failed to load settings: " + e.getMessage());
+        }
+    }
+
+    public void saveSettingsNow() {
+        JsonObject root = new JsonObject();
+        JsonObject names = new JsonObject();
+        for (Map.Entry<UUID, String> entry : portalNames.entrySet()) {
+            names.addProperty(entry.getKey().toString(), entry.getValue());
+        }
+        root.add("portalNames", names);
+
+        JsonObject hues = new JsonObject();
+        for (Map.Entry<UUID, Float> entry : portalHues.entrySet()) {
+            hues.addProperty(entry.getKey().toString(), entry.getValue());
+        }
+        root.add("portalHues", hues);
+
+        try {
+            Files.createDirectories(configPath.getParent());
+            try (var writer = Files.newBufferedWriter(configPath, StandardCharsets.UTF_8)) {
+                GSON.toJson(root, writer);
+            }
+        } catch (Exception e) {
+            System.err.println("[PortalZoneVisualizer] Failed to save settings: " + e.getMessage());
+        }
     }
 
     /**

@@ -6,14 +6,16 @@ import com.portalzone.portal.PortalManager;
 import com.portalzone.render.PortalRenderer;
 import net.minecraft.client.Camera;
 import net.minecraft.client.renderer.MultiBufferSource;
-import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Calculates and renders 3D Voronoi cell borders for portal zones
@@ -22,7 +24,7 @@ public class VoronoiCalculator {
     private static final VoronoiCalculator INSTANCE = new VoronoiCalculator();
 
     // Voronoi calculation parameters
-    private static final int SAMPLE_SPACING = 2; // Sample every 1 block
+    private static final int SAMPLE_SPACING = 1; // Sample every 1 block
     private static final int LOCAL_RADIUS = 128;
 
     // Cached Voronoi edges
@@ -90,6 +92,18 @@ public class VoronoiCalculator {
 
         // Convert to list for easier indexing
         List<PortalInfo> portalList = new ArrayList<>(portalSource);
+        int portalCount = portalList.size();
+        PortalInfo[] portals = portalList.toArray(new PortalInfo[0]);
+        double[] portalX = new double[portalCount];
+        double[] portalY = new double[portalCount];
+        double[] portalZ = new double[portalCount];
+        for (int i = 0; i < portalCount; i++) {
+            PortalInfo portal = portals[i];
+            Vec3 portalPos = useTranslatedPositions ? portal.getTranslatedPos() : portal.getCenterPos();
+            portalX[i] = portalPos.x;
+            portalY[i] = portalPos.y;
+            portalZ[i] = portalPos.z;
+        }
 
         // Sample points in 3D space around the player
         int minX = ((int) playerPos.x - LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
@@ -99,75 +113,98 @@ public class VoronoiCalculator {
         int minZ = ((int) playerPos.z - LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
         int maxZ = ((int) playerPos.z + LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
 
-        // Create a 3D grid to store nearest portal for each sample point
-        Map<BlockPos, PortalInfo> nearestPortalMap = new HashMap<>();
+        int xCount = ((maxX - minX) / SAMPLE_SPACING) + 1;
+        int yCount = ((maxY - minY) / SAMPLE_SPACING) + 1;
+        int zCount = ((maxZ - minZ) / SAMPLE_SPACING) + 1;
+        int[] nearestPortalIdx = new int[xCount * yCount * zCount];
+        Arrays.fill(nearestPortalIdx, -1);
 
         // For each sample point, find the nearest portal (in translated coordinates)
-        for (int x = minX; x <= maxX; x += SAMPLE_SPACING) {
-            for (int y = minY; y <= maxY; y += SAMPLE_SPACING) {
-                for (int z = minZ; z <= maxZ; z += SAMPLE_SPACING) {
-                    Vec3 samplePoint = new Vec3(x, y, z);
-                    PortalInfo nearest = findNearestPortal(samplePoint, portalList, useTranslatedPositions);
-
-                    if (nearest != null) {
-                        nearestPortalMap.put(new BlockPos(x, y, z), nearest);
+        for (int x = minX, ix = 0; x <= maxX; x += SAMPLE_SPACING, ix++) {
+            for (int y = minY, iy = 0; y <= maxY; y += SAMPLE_SPACING, iy++) {
+                for (int z = minZ, iz = 0; z <= maxZ; z += SAMPLE_SPACING, iz++) {
+                    int nearest = findNearestPortalIndex(x, y, z, portalX, portalY, portalZ);
+                    if (nearest >= 0) {
+                        int index = ((ix * yCount) + iy) * zCount + iz;
+                        nearestPortalIdx[index] = nearest;
                     }
                 }
             }
         }
 
         // Find edges where the nearest portal changes
-        for (int x = minX; x <= maxX; x += SAMPLE_SPACING) {
-            for (int y = minY; y <= maxY; y += SAMPLE_SPACING) {
-                for (int z = minZ; z <= maxZ; z += SAMPLE_SPACING) {
-                    BlockPos pos = new BlockPos(x, y, z);
-                    PortalInfo portal = nearestPortalMap.get(pos);
+        for (int x = minX, ix = 0; x <= maxX; x += SAMPLE_SPACING, ix++) {
+            for (int y = minY, iy = 0; y <= maxY; y += SAMPLE_SPACING, iy++) {
+                for (int z = minZ, iz = 0; z <= maxZ; z += SAMPLE_SPACING, iz++) {
+                    int index = ((ix * yCount) + iy) * zCount + iz;
+                    int portalIndex = nearestPortalIdx[index];
+                    if (portalIndex < 0) {
+                        continue;
+                    }
 
-                    if (portal == null) continue;
-
-                    // Check all 6 neighbors
-                    checkAndAddEdge(nearestPortalMap, pos, pos.offset(SAMPLE_SPACING, 0, 0), portal);
-                    checkAndAddEdge(nearestPortalMap, pos, pos.offset(0, SAMPLE_SPACING, 0), portal);
-                    checkAndAddEdge(nearestPortalMap, pos, pos.offset(0, 0, SAMPLE_SPACING), portal);
+                    // Check neighbors in +X, +Y, +Z directions
+                    if (ix + 1 < xCount) {
+                        checkAndAddEdge(nearestPortalIdx, portals, index,
+                            ((ix + 1) * yCount + iy) * zCount + iz,
+                            x, y, z, x + SAMPLE_SPACING, y, z);
+                    }
+                    if (iy + 1 < yCount) {
+                        checkAndAddEdge(nearestPortalIdx, portals, index,
+                            (ix * yCount + (iy + 1)) * zCount + iz,
+                            x, y, z, x, y + SAMPLE_SPACING, z);
+                    }
+                    if (iz + 1 < zCount) {
+                        checkAndAddEdge(nearestPortalIdx, portals, index,
+                            (ix * yCount + iy) * zCount + (iz + 1),
+                            x, y, z, x, y, z + SAMPLE_SPACING);
+                    }
                 }
             }
         }
+
+        System.out.println("[Voronoi] portals=" + portalCount
+            + " edges=" + cachedEdges.size()
+            + " grid=" + xCount + "x" + yCount + "x" + zCount);
     }
 
     /**
      * Find the nearest portal to a point (using translated coordinates)
      */
-    private PortalInfo findNearestPortal(Vec3 point, List<PortalInfo> portals, boolean useTranslatedPositions) {
-        PortalInfo nearest = null;
+    private int findNearestPortalIndex(double x, double y, double z,
+                                       double[] portalX, double[] portalY, double[] portalZ) {
+        int nearestIndex = -1;
         double minDistance = Double.MAX_VALUE;
 
-        for (PortalInfo portal : portals) {
-            Vec3 portalPos = useTranslatedPositions ? portal.getTranslatedPos() : portal.getCenterPos();
-            double distance = portalPos.distanceToSqr(point);
+        for (int i = 0; i < portalX.length; i++) {
+            double dx = portalX[i] - x;
+            double dy = portalY[i] - y;
+            double dz = portalZ[i] - z;
+            double distance = (dx * dx) + (dy * dy) + (dz * dz);
 
             if (distance < minDistance) {
                 minDistance = distance;
-                nearest = portal;
+                nearestIndex = i;
             }
         }
 
-        return nearest;
+        return nearestIndex;
     }
 
     /**
      * Check if there's an edge between two sample points and add it if so
      */
-    private void checkAndAddEdge(Map<BlockPos, PortalInfo> nearestPortalMap,
-                                  BlockPos pos1, BlockPos pos2, PortalInfo portal1) {
-        PortalInfo portal2 = nearestPortalMap.get(pos2);
+    private void checkAndAddEdge(int[] nearestPortalIdx, PortalInfo[] portals, int index1, int index2,
+                                 int x1, int y1, int z1, int x2, int y2, int z2) {
+        int portal1Index = nearestPortalIdx[index1];
+        int portal2Index = nearestPortalIdx[index2];
 
-        if (portal2 != null && !portal1.equals(portal2)) {
+        if (portal1Index >= 0 && portal2Index >= 0 && portal1Index != portal2Index) {
             // Edge found! Add it
-            Vec3 start = new Vec3(pos1.getX(), pos1.getY(), pos1.getZ());
-            Vec3 end = new Vec3(pos2.getX(), pos2.getY(), pos2.getZ());
+            Vec3 start = new Vec3(x1, y1, z1);
+            Vec3 end = new Vec3(x2, y2, z2);
 
             // Use the color of portal1 (or could blend both)
-            Vector3f color = portal1.color;
+            Vector3f color = PortalManager.getInstance().getPortalColor(portals[portal1Index]);
 
             cachedEdges.add(new VoronoiEdge(start, end, color));
         }

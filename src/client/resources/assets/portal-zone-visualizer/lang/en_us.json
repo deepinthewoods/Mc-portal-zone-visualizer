@@ -2,5 +2,6 @@
   "key.portal-zone-visualizer.toggle": "Toggle Portal Visualization",
   "key.portal-zone-visualizer.manage": "Portal Management",
   "category.portal-zone-visualizer": "Portal Zone Visualizer",
-  "gui.portal-zone-visualizer.portal_list": "Portal Management"
+  "gui.portal-zone-visualizer.portal_list": "Portal Management",
+  "gui.portal-zone-visualizer.hue": "Hue: %s"
 }
