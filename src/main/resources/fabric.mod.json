@@ -1,41 +1,34 @@
 {
 	"schemaVersion": 1,
-	"id": "modid",
+	"id": "portal-zone-visualizer",
 	"version": "${version}",
-	"name": "Example mod",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"name": "Portal Zone Visualizer",
+	"description": "Visualizes Nether portal zones and linking boundaries in 3D",
 	"authors": [
-		"Me!"
+		"deepinthewoods"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://github.com/deepinthewoods/Mc-portal-zone-visualizer",
+		"sources": "https://github.com/deepinthewoods/Mc-portal-zone-visualizer"
 	},
 	"license": "CC0-1.0",
-	"icon": "assets/modid/icon.png",
-	"environment": "*",
+	"icon": "assets/portal-zone-visualizer/icon.png",
+	"environment": "client",
 	"entrypoints": {
-		"main": [
-			"com.example.ExampleMod"
-		],
 		"client": [
-			"com.example.ExampleModClient"
+			"com.portalzone.PortalZoneVisualizerClient"
 		]
 	},
 	"mixins": [
-		"modid.mixins.json",
 		{
-			"config": "modid.client.mixins.json",
+			"config": "portal-zone-visualizer.client.mixins.json",
 			"environment": "client"
 		}
 	],
 	"depends": {
 		"fabricloader": ">=0.18.2",
-		"minecraft": "~1.21.11",
+		"minecraft": "~1.21.10",
 		"java": ">=21",
 		"fabric-api": "*"
-	},
-	"suggests": {
-		"another-mod": "*"
 	}
 }
