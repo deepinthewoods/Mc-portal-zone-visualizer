@@ -1,10 +1,14 @@
 package com.portalzone.render;
 
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.portalzone.PortalZoneVisualizerClient;
 import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalManager;
 import com.portalzone.voronoi.VoronoiCalculator;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
+import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.OrderedRenderCommandQueue;
 import net.minecraft.client.renderer.RenderLayer;
 import net.minecraft.client.renderer.WorldRenderState;
@@ -12,6 +16,7 @@ import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
@@ -82,6 +87,11 @@ public class PortalRenderer {
 
         // Draw circle as billboard
         drawBillboardCircle(queue, matrices, relPos, size, color.x, color.y, color.z, 0.8f);
+
+        // Draw label below the circle
+        Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
+        String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
+        renderLabel(queue, matrices, relPos.add(labelOffset), displayName, color, distance);
     }
 
     /**
@@ -100,6 +110,11 @@ public class PortalRenderer {
 
         // Draw X mark as billboard
         drawBillboardX(queue, matrices, relPos, size, color.x, color.y, color.z, 0.8f);
+
+        // Draw label below the X
+        Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
+        String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
+        renderLabel(queue, matrices, relPos.add(labelOffset), displayName, color, distance);
     }
 
     /**
@@ -184,6 +199,46 @@ public class PortalRenderer {
         submitLine(queue, matrices, r, g, b, a, FULLBRIGHT,
             topRight.x, topRight.y, topRight.z,
             bottomLeft.x, bottomLeft.y, bottomLeft.z);
+    }
+
+    /**
+     * Render a text label as a billboard
+     */
+    private static void renderLabel(OrderedRenderCommandQueue queue, MatrixStack matrices,
+                                    Vec3 relPos, String text, Vector3f color, double distance) {
+        Minecraft mc = Minecraft.getInstance();
+        Font font = mc.font;
+
+        // Create a PoseStack for text rendering
+        PoseStack poseStack = new PoseStack();
+        poseStack.translate(relPos.x, relPos.y, relPos.z);
+
+        // Face the camera
+        Quaternionf camRot = mc.gameRenderer.getCamera().rotation();
+        poseStack.mulPose(camRot);
+
+        // Scale based on distance for readability
+        float scale = (float) (0.02f * Math.max(1.0, distance / 20.0));
+        poseStack.scale(-scale, -scale, scale);
+
+        // Get buffer source from queue
+        MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
+
+        // Calculate text width for centering
+        int textWidth = font.width(text);
+
+        // Convert color to ARGB format
+        int argbColor = 0xFF000000 |
+                       ((int)(color.x * 255) << 16) |
+                       ((int)(color.y * 255) << 8) |
+                       (int)(color.z * 255);
+
+        // Draw the text
+        font.drawInBatch(text, -textWidth / 2f, 0, argbColor, false,
+                        poseStack.last().pose(), bufferSource, Font.DisplayMode.NORMAL,
+                        0, FULLBRIGHT);
+
+        bufferSource.endBatch();
     }
 
     /**

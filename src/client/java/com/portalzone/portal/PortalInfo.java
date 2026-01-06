@@ -68,6 +68,14 @@ public class PortalInfo {
     }
 
     /**
+     * Get the last 3 characters of the UUID for display
+     */
+    public String getShortId() {
+        String uuidStr = uuid.toString().replace("-", "");
+        return uuidStr.substring(Math.max(0, uuidStr.length() - 3));
+    }
+
+    /**
      * Generate a consistent UUID for this portal based on its position and dimension
      */
     private static UUID generateUUID(BlockPos pos, ResourceKey<Level> dimension) {

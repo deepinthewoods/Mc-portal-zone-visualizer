@@ -30,6 +30,9 @@ public class PortalManager {
     // Flag to indicate portals have changed (for Voronoi recalculation)
     private boolean portalsChanged = true;
 
+    // Store custom names for portals (persistent across rescans)
+    private final Map<UUID, String> portalNames = new ConcurrentHashMap<>();
+
     private PortalManager() {
     }
 
@@ -302,7 +305,34 @@ public class PortalManager {
     public void clear() {
         portalsByDimension.clear();
         scannedChunks.clear();
+        portalNames.clear();
         portalsChanged = true;
+    }
+
+    /**
+     * Set a custom name for a portal
+     */
+    public void setPortalName(UUID portalUuid, String name) {
+        if (name == null || name.trim().isEmpty()) {
+            portalNames.remove(portalUuid);
+        } else {
+            portalNames.put(portalUuid, name.trim());
+        }
+    }
+
+    /**
+     * Get the custom name for a portal, or null if not set
+     */
+    public String getPortalName(UUID portalUuid) {
+        return portalNames.get(portalUuid);
+    }
+
+    /**
+     * Get the display name for a portal (custom name if set, otherwise short ID)
+     */
+    public String getPortalDisplayName(PortalInfo portal) {
+        String customName = portalNames.get(portal.uuid);
+        return customName != null ? customName : portal.getShortId();
     }
 
     /**
