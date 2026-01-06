@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.*;
@@ -38,7 +39,7 @@ public class VoronoiCalculator {
     /**
      * Render the Voronoi borders
      */
-    public void render(PoseStack poseStack, MultiBufferSource bufferSource, Vec3 camPos, ResourceKey<Level> currentDim, Camera camera) {
+    public void render(PoseStack matrices, MultiBufferSource bufferSource, Vec3 camPos, ResourceKey<Level> currentDim, Camera camera) {
         // Recalculate if portals have changed or dimension changed
         if (PortalManager.getInstance().hasPortalsChanged() || !currentDim.equals(cachedDimension)) {
             recalculateVoronoi(camPos, currentDim);
@@ -46,18 +47,21 @@ public class VoronoiCalculator {
             cachedDimension = currentDim;
         }
 
-        // Render cached edges
+        // Calculate normal from camera forward vector (pointing toward camera)
+        var rot = camera.rotation();
+        Quaternionf cameraRot = new Quaternionf(rot);
+        Vector3f forward = new Vector3f(0f, 0f, 1f).rotate(cameraRot);
+
+        // Render cached edges with world coordinates (PoseStack is already camera-relative)
         for (VoronoiEdge edge : cachedEdges) {
             Vector3f color = edge.color;
-            Vec3 relStart = edge.start.subtract(camPos);
-            Vec3 relEnd = edge.end.subtract(camPos);
 
-            PortalRenderer.submitLine(poseStack, bufferSource,
+            PortalRenderer.submitLine(matrices, bufferSource,
                 color.x, color.y, color.z, 0.6f,
                 0x00F000F0,
-                relStart.x, relStart.y, relStart.z,
-                relEnd.x, relEnd.y, relEnd.z,
-                camera.rotation());
+                edge.start.x, edge.start.y, edge.start.z,
+                edge.end.x, edge.end.y, edge.end.z,
+                forward);
         }
     }
 
@@ -70,14 +74,22 @@ public class VoronoiCalculator {
         // Get portals from the OTHER dimension (the ones we would link to)
         ResourceKey<Level> otherDim = currentDim == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
         Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
+        Set<PortalInfo> portalSource = otherDimPortals;
+        boolean useTranslatedPositions = true;
 
-        if (otherDimPortals.isEmpty() || otherDimPortals.size() < 2) {
+        if (portalSource.size() < 2) {
+            // Fallback to current dimension portals so borders still render
+            portalSource = PortalManager.getInstance().getPortalsInDimension(currentDim);
+            useTranslatedPositions = false;
+        }
+
+        if (portalSource.size() < 2) {
             // Need at least 2 portals to have borders
             return;
         }
 
         // Convert to list for easier indexing
-        List<PortalInfo> portalList = new ArrayList<>(otherDimPortals);
+        List<PortalInfo> portalList = new ArrayList<>(portalSource);
 
         // Sample points in 3D space around the player
         int minX = ((int) playerPos.x - LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
@@ -95,7 +107,7 @@ public class VoronoiCalculator {
             for (int y = minY; y <= maxY; y += SAMPLE_SPACING) {
                 for (int z = minZ; z <= maxZ; z += SAMPLE_SPACING) {
                     Vec3 samplePoint = new Vec3(x, y, z);
-                    PortalInfo nearest = findNearestPortal(samplePoint, portalList);
+                    PortalInfo nearest = findNearestPortal(samplePoint, portalList, useTranslatedPositions);
 
                     if (nearest != null) {
                         nearestPortalMap.put(new BlockPos(x, y, z), nearest);
@@ -125,13 +137,13 @@ public class VoronoiCalculator {
     /**
      * Find the nearest portal to a point (using translated coordinates)
      */
-    private PortalInfo findNearestPortal(Vec3 point, List<PortalInfo> portals) {
+    private PortalInfo findNearestPortal(Vec3 point, List<PortalInfo> portals, boolean useTranslatedPositions) {
         PortalInfo nearest = null;
         double minDistance = Double.MAX_VALUE;
 
         for (PortalInfo portal : portals) {
-            Vec3 translatedPos = portal.getTranslatedPos();
-            double distance = translatedPos.distanceToSqr(point);
+            Vec3 portalPos = useTranslatedPositions ? portal.getTranslatedPos() : portal.getCenterPos();
+            double distance = portalPos.distanceToSqr(point);
 
             if (distance < minDistance) {
                 minDistance = distance;

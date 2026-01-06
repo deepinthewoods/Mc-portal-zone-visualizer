@@ -53,6 +53,8 @@ public class PortalManager {
         // Scan chunks in current dimension
         scanLoadedChunks(level);
 
+        System.out.println("DEBUG: Total portals tracked: " + getAllPortals().size());
+
         // TODO: Scan chunks in the other dimension
         // This requires loading chunks from the other dimension
         // We'll implement this in the cross-dimension scanning task
@@ -77,17 +79,27 @@ public class PortalManager {
         // Scan chunks in a radius around the player
         int chunkRadius = mc.options.renderDistance().get();
 
+        int chunksToScan = 0;
+        int chunksScanned = 0;
+
         for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
             for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
                 int chunkX = playerChunkX + dx;
                 int chunkZ = playerChunkZ + dz;
                 ChunkPos chunkPos = new ChunkPos(chunkX, chunkZ);
 
+                // Check if chunk is loaded
+                if (!level.hasChunk(chunkX, chunkZ)) {
+                    continue;
+                }
+
                 // Try to get the chunk
                 LevelChunk chunk = level.getChunk(chunkX, chunkZ);
                 if (chunk == null) {
                     continue;
                 }
+
+                chunksToScan++;
 
                 // Skip if already scanned
                 Set<ChunkPos> scanned = scannedChunks.computeIfAbsent(dimension, k -> ConcurrentHashMap.newKeySet());
@@ -96,9 +108,14 @@ public class PortalManager {
                 }
 
                 // Scan this chunk for portals
+                chunksScanned++;
                 scanChunk(level, chunk, dimension);
                 scanned.add(chunkPos);
             }
+        }
+
+        if (chunksScanned > 0) {
+            System.out.println("DEBUG: Scanned " + chunksScanned + " new chunks out of " + chunksToScan + " available");
         }
     }
 
@@ -114,6 +131,8 @@ public class PortalManager {
 
         Set<BlockPos> processedPositions = new HashSet<>();
 
+        System.out.println("DEBUG: Scanning chunk " + chunkPos + " in dimension " + dimension.location());
+
         // Scan the chunk
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
@@ -126,10 +145,14 @@ public class PortalManager {
 
                     BlockState state = level.getBlockState(pos);
                     if (state.is(Blocks.NETHER_PORTAL)) {
+                        System.out.println("DEBUG: Found portal block at " + pos);
                         // Found a portal block, try to identify the portal structure
                         PortalInfo portal = identifyPortal(level, pos, processedPositions);
                         if (portal != null) {
+                            System.out.println("DEBUG: Successfully identified portal at " + portal.position);
                             addPortal(dimension, portal);
+                        } else {
+                            System.out.println("DEBUG: Failed to identify portal structure at " + pos);
                         }
                     }
                 }

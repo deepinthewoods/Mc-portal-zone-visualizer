@@ -19,12 +19,6 @@
 			"com.portalzone.PortalZoneVisualizerClient"
 		]
 	},
-	"mixins": [
-		{
-			"config": "portal-zone-visualizer.client.mixins.json",
-			"environment": "client"
-		}
-	],
 	"depends": {
 		"fabricloader": ">=0.18.2",
 		"minecraft": "~1.21.10",

@@ -6,6 +6,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3f;
 
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /**
@@ -80,9 +81,8 @@ public class PortalInfo {
      */
     private static UUID generateUUID(BlockPos pos, ResourceKey<Level> dimension) {
         // Use position and dimension to create a consistent UUID
-        long mostSig = ((long) pos.getX() << 32) | (pos.getY() << 16) | pos.getZ();
-        long leastSig = dimension.location().toString().hashCode();
-        return new UUID(mostSig, leastSig);
+        String key = dimension.location() + ":" + pos.getX() + ":" + pos.getY() + ":" + pos.getZ();
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

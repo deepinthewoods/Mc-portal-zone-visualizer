@@ -2,10 +2,13 @@ package com.portalzone;
 
 import com.portalzone.gui.PortalManagementScreen;
 import com.portalzone.portal.PortalManager;
+import com.portalzone.render.PortalRenderer;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
 import org.lwjgl.glfw.GLFW;
 
 /**
@@ -66,6 +69,25 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
             if (client.level == null) {
                 PortalManager.getInstance().clear();
             }
+        });
+
+        WorldRenderEvents.BEFORE_DEBUG_RENDER.register(context -> {
+            var matrices = context.matrices();
+            if (matrices == null) {
+                return;
+            }
+
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null || mc.player == null) {
+                return;
+            }
+
+            var camera = mc.gameRenderer.getMainCamera();
+            var camPos = camera.getPosition();
+            matrices.pushPose();
+            matrices.translate(-camPos.x, -camPos.y, -camPos.z);
+            PortalRenderer.render(matrices, camera, context.consumers());
+            matrices.popPose();
         });
     }
 
