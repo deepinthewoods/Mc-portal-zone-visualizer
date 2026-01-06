@@ -6,13 +6,11 @@ import com.portalzone.PortalZoneVisualizerClient;
 import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalManager;
 import com.portalzone.voronoi.VoronoiCalculator;
+import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.MultiBufferSource;
-import net.minecraft.client.renderer.OrderedRenderCommandQueue;
-import net.minecraft.client.renderer.RenderLayer;
-import net.minecraft.client.renderer.WorldRenderState;
-import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -31,7 +29,7 @@ public class PortalRenderer {
     private static final int MIN_PIXEL_SIZE = 20; // Minimum 20 pixels on screen
     private static final int MAX_RENDER_DISTANCE = 256; // Max render distance in blocks
 
-    public static void render(MatrixStack matrices, WorldRenderState renderState, OrderedRenderCommandQueue queue) {
+    public static void render(PoseStack poseStack, Camera camera) {
         // Check if rendering is enabled
         if (!PortalZoneVisualizerClient.isRenderingEnabled()) {
             return;
@@ -43,8 +41,11 @@ public class PortalRenderer {
         }
 
         // Get camera position
-        Vec3 camPos = mc.gameRenderer.getCamera().getPos();
+        Vec3 camPos = camera.getPosition();
         ResourceKey<Level> currentDim = mc.level.dimension();
+
+        // Get buffer source for rendering
+        MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
 
         // Render portals in current dimension (as circles)
         Set<PortalInfo> currentDimPortals = PortalManager.getInstance().getPortalsInDimension(currentDim);
@@ -52,7 +53,7 @@ public class PortalRenderer {
             double distance = portal.getCenterPos().distanceTo(camPos);
             if (distance > MAX_RENDER_DISTANCE) continue;
 
-            renderPortalCircle(queue, matrices, camPos, portal);
+            renderPortalCircle(poseStack, bufferSource, camPos, portal, camera);
         }
 
         // Render portals in other dimension (as X marks with translated coordinates)
@@ -63,18 +64,21 @@ public class PortalRenderer {
             double distance = translatedPos.distanceTo(camPos);
             if (distance > MAX_RENDER_DISTANCE) continue;
 
-            renderPortalX(queue, matrices, camPos, portal, translatedPos);
+            renderPortalX(poseStack, bufferSource, camPos, portal, translatedPos, camera);
         }
 
         // Render Voronoi borders
-        VoronoiCalculator.getInstance().render(queue, matrices, camPos, currentDim);
+        VoronoiCalculator.getInstance().render(poseStack, bufferSource, camPos, currentDim, camera);
+
+        // End batch to flush all rendering
+        bufferSource.endBatch();
     }
 
     /**
      * Render a portal as a billboard circle in its actual dimension
      */
-    private static void renderPortalCircle(OrderedRenderCommandQueue queue, MatrixStack matrices,
-                                           Vec3 camPos, PortalInfo portal) {
+    private static void renderPortalCircle(PoseStack poseStack, MultiBufferSource bufferSource,
+                                           Vec3 camPos, PortalInfo portal, Camera camera) {
         Vec3 worldPos = portal.getCenterPos();
         Vec3 relPos = worldPos.subtract(camPos);
         double distance = relPos.length();
@@ -86,19 +90,19 @@ public class PortalRenderer {
         Vector3f color = portal.color;
 
         // Draw circle as billboard
-        drawBillboardCircle(queue, matrices, relPos, size, color.x, color.y, color.z, 0.8f);
+        drawBillboardCircle(poseStack, bufferSource, relPos, size, color.x, color.y, color.z, 0.8f, camera);
 
         // Draw label below the circle
         Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
         String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
-        renderLabel(queue, matrices, relPos.add(labelOffset), displayName, color, distance);
+        renderLabel(poseStack, bufferSource, relPos.add(labelOffset), displayName, color, distance, camera);
     }
 
     /**
      * Render a portal as a billboard X mark with translated coordinates
      */
-    private static void renderPortalX(OrderedRenderCommandQueue queue, MatrixStack matrices,
-                                      Vec3 camPos, PortalInfo portal, Vec3 translatedPos) {
+    private static void renderPortalX(PoseStack poseStack, MultiBufferSource bufferSource,
+                                      Vec3 camPos, PortalInfo portal, Vec3 translatedPos, Camera camera) {
         Vec3 relPos = translatedPos.subtract(camPos);
         double distance = relPos.length();
 
@@ -109,12 +113,12 @@ public class PortalRenderer {
         Vector3f color = portal.color;
 
         // Draw X mark as billboard
-        drawBillboardX(queue, matrices, relPos, size, color.x, color.y, color.z, 0.8f);
+        drawBillboardX(poseStack, bufferSource, relPos, size, color.x, color.y, color.z, 0.8f, camera);
 
         // Draw label below the X
         Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
         String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
-        renderLabel(queue, matrices, relPos.add(labelOffset), displayName, color, distance);
+        renderLabel(poseStack, bufferSource, relPos.add(labelOffset), displayName, color, distance, camera);
     }
 
     /**
@@ -139,10 +143,9 @@ public class PortalRenderer {
     /**
      * Draw a billboard circle facing the camera
      */
-    private static void drawBillboardCircle(OrderedRenderCommandQueue queue, MatrixStack matrices,
-                                            Vec3 center, float size, float r, float g, float b, float a) {
-        Minecraft mc = Minecraft.getInstance();
-        Quaternionf camRot = mc.gameRenderer.getCamera().rotation();
+    private static void drawBillboardCircle(PoseStack poseStack, MultiBufferSource bufferSource,
+                                            Vec3 center, float size, float r, float g, float b, float a, Camera camera) {
+        Quaternionf camRot = camera.rotation();
 
         // Calculate camera-facing right and up vectors
         Vector3f right = new Vector3f(1, 0, 0).rotate(camRot).mul(size);
@@ -164,9 +167,9 @@ public class PortalRenderer {
             );
 
             if (prevPoint != null) {
-                submitLine(queue, matrices, r, g, b, a, FULLBRIGHT,
+                submitLine(poseStack, bufferSource, r, g, b, a, FULLBRIGHT,
                     prevPoint.x, prevPoint.y, prevPoint.z,
-                    point.x, point.y, point.z);
+                    point.x, point.y, point.z, camRot);
             }
 
             prevPoint = point;
@@ -176,10 +179,9 @@ public class PortalRenderer {
     /**
      * Draw a billboard X mark facing the camera
      */
-    private static void drawBillboardX(OrderedRenderCommandQueue queue, MatrixStack matrices,
-                                       Vec3 center, float size, float r, float g, float b, float a) {
-        Minecraft mc = Minecraft.getInstance();
-        Quaternionf camRot = mc.gameRenderer.getCamera().rotation();
+    private static void drawBillboardX(PoseStack poseStack, MultiBufferSource bufferSource,
+                                       Vec3 center, float size, float r, float g, float b, float a, Camera camera) {
+        Quaternionf camRot = camera.rotation();
 
         // Calculate camera-facing right and up vectors
         Vector3f right = new Vector3f(1, 0, 0).rotate(camRot).mul(size);
@@ -192,37 +194,34 @@ public class PortalRenderer {
         Vec3 bottomLeft = center.add(-right.x - up.x, -right.y - up.y, -right.z - up.z);
 
         // Draw X (two diagonals)
-        submitLine(queue, matrices, r, g, b, a, FULLBRIGHT,
+        submitLine(poseStack, bufferSource, r, g, b, a, FULLBRIGHT,
             topLeft.x, topLeft.y, topLeft.z,
-            bottomRight.x, bottomRight.y, bottomRight.z);
+            bottomRight.x, bottomRight.y, bottomRight.z, camRot);
 
-        submitLine(queue, matrices, r, g, b, a, FULLBRIGHT,
+        submitLine(poseStack, bufferSource, r, g, b, a, FULLBRIGHT,
             topRight.x, topRight.y, topRight.z,
-            bottomLeft.x, bottomLeft.y, bottomLeft.z);
+            bottomLeft.x, bottomLeft.y, bottomLeft.z, camRot);
     }
 
     /**
      * Render a text label as a billboard
      */
-    private static void renderLabel(OrderedRenderCommandQueue queue, MatrixStack matrices,
-                                    Vec3 relPos, String text, Vector3f color, double distance) {
+    private static void renderLabel(PoseStack poseStack, MultiBufferSource bufferSource,
+                                    Vec3 relPos, String text, Vector3f color, double distance, Camera camera) {
         Minecraft mc = Minecraft.getInstance();
         Font font = mc.font;
 
-        // Create a PoseStack for text rendering
-        PoseStack poseStack = new PoseStack();
+        // Save pose stack state
+        poseStack.pushPose();
         poseStack.translate(relPos.x, relPos.y, relPos.z);
 
         // Face the camera
-        Quaternionf camRot = mc.gameRenderer.getCamera().rotation();
+        Quaternionf camRot = camera.rotation();
         poseStack.mulPose(camRot);
 
         // Scale based on distance for readability
         float scale = (float) (0.02f * Math.max(1.0, distance / 20.0));
         poseStack.scale(-scale, -scale, scale);
-
-        // Get buffer source from queue
-        MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
 
         // Calculate text width for centering
         int textWidth = font.width(text);
@@ -238,30 +237,32 @@ public class PortalRenderer {
                         poseStack.last().pose(), bufferSource, Font.DisplayMode.NORMAL,
                         0, FULLBRIGHT);
 
-        bufferSource.endBatch();
+        // Restore pose stack state
+        poseStack.popPose();
     }
 
     /**
      * Submit a line to the render queue
      */
-    public static void submitLine(OrderedRenderCommandQueue queue, MatrixStack matrices,
+    public static void submitLine(PoseStack poseStack, MultiBufferSource bufferSource,
                                    float r, float g, float b, float a, int light,
                                    double ax, double ay, double az,
-                                   double bx, double by, double bz) {
-        RenderLayer layer = RenderLayer.getLines();
-        var bq = queue.getBatchingQueue(1000);
-        var cam = Minecraft.getInstance().gameRenderer.getCamera();
-        var rot = cam.rotation();
-        Vector3f forward = new Vector3f(0f, 0f, -1f).rotate(rot);
-        final float nx = forward.x, ny = forward.y, nz = forward.z;
+                                   double bx, double by, double bz,
+                                   Quaternionf rotation) {
+        RenderType renderType = RenderType.lines();
+        VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
 
-        bq.submitCustom(matrices, layer, (entry, vc) -> {
-            vc.vertex(entry, (float)ax, (float)ay, (float)az)
-                .color(r, g, b, a)
-                .normal(entry, nx, ny, nz);
-            vc.vertex(entry, (float)bx, (float)by, (float)bz)
-                .color(r, g, b, a)
-                .normal(entry, nx, ny, nz);
-        });
+        Vector3f forward = new Vector3f(0f, 0f, -1f).rotate(rotation);
+        Matrix4f pose = poseStack.last().pose();
+
+        // First vertex
+        vertexConsumer.addVertex(pose, (float)ax, (float)ay, (float)az)
+                .setColor(r, g, b, a)
+                .setNormal(poseStack.last(), forward.x, forward.y, forward.z);
+
+        // Second vertex
+        vertexConsumer.addVertex(pose, (float)bx, (float)by, (float)bz)
+                .setColor(r, g, b, a)
+                .setNormal(poseStack.last(), forward.x, forward.y, forward.z);
     }
 }

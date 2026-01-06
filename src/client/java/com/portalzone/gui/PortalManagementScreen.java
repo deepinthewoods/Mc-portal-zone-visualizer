@@ -93,7 +93,8 @@ public class PortalManagementScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        this.renderBackground(graphics, mouseX, mouseY, partialTick);
+        // Render transparent background instead of blurred background
+        this.renderTransparentBackground(graphics);
 
         // Draw title
         graphics.drawCenteredString(this.font, this.title, this.width / 2, 10, 0xFFFFFF);

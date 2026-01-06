@@ -29,13 +29,13 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
         toggleVisualizationKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
             "key.portal-zone-visualizer.toggle",
             GLFW.GLFW_KEY_P,
-            "category.portal-zone-visualizer"
+            KeyMapping.Category.MISC
         ));
 
         portalManagementKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
             "key.portal-zone-visualizer.manage",
             GLFW.GLFW_KEY_O,
-            "category.portal-zone-visualizer"
+            KeyMapping.Category.MISC
         ));
 
         // Register tick event to update portal manager

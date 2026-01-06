@@ -1,10 +1,11 @@
 package com.portalzone.voronoi;
 
+import com.mojang.blaze3d.vertex.PoseStack;
 import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalManager;
 import com.portalzone.render.PortalRenderer;
-import net.minecraft.client.renderer.OrderedRenderCommandQueue;
-import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.Camera;
+import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -37,7 +38,7 @@ public class VoronoiCalculator {
     /**
      * Render the Voronoi borders
      */
-    public void render(OrderedRenderCommandQueue queue, MatrixStack matrices, Vec3 camPos, ResourceKey<Level> currentDim) {
+    public void render(PoseStack poseStack, MultiBufferSource bufferSource, Vec3 camPos, ResourceKey<Level> currentDim, Camera camera) {
         // Recalculate if portals have changed or dimension changed
         if (PortalManager.getInstance().hasPortalsChanged() || !currentDim.equals(cachedDimension)) {
             recalculateVoronoi(camPos, currentDim);
@@ -51,11 +52,12 @@ public class VoronoiCalculator {
             Vec3 relStart = edge.start.subtract(camPos);
             Vec3 relEnd = edge.end.subtract(camPos);
 
-            PortalRenderer.submitLine(queue, matrices,
+            PortalRenderer.submitLine(poseStack, bufferSource,
                 color.x, color.y, color.z, 0.6f,
                 0x00F000F0,
                 relStart.x, relStart.y, relStart.z,
-                relEnd.x, relEnd.y, relEnd.z);
+                relEnd.x, relEnd.y, relEnd.z,
+                camera.rotation());
         }
     }
 

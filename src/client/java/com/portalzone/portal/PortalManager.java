@@ -63,20 +63,42 @@ public class PortalManager {
      */
     private void scanLoadedChunks(ClientLevel level) {
         ResourceKey<Level> dimension = level.dimension();
+        Minecraft mc = Minecraft.getInstance();
 
-        // Get all loaded chunks
-        for (LevelChunk chunk : level.getChunkSource().getLoadedChunks()) {
-            ChunkPos chunkPos = chunk.getPos();
+        if (mc.player == null) {
+            return;
+        }
 
-            // Skip if already scanned
-            Set<ChunkPos> scanned = scannedChunks.computeIfAbsent(dimension, k -> ConcurrentHashMap.newKeySet());
-            if (scanned.contains(chunkPos)) {
-                continue;
+        // Get player chunk position
+        BlockPos playerPos = mc.player.blockPosition();
+        int playerChunkX = playerPos.getX() >> 4;
+        int playerChunkZ = playerPos.getZ() >> 4;
+
+        // Scan chunks in a radius around the player
+        int chunkRadius = mc.options.renderDistance().get();
+
+        for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+            for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                int chunkX = playerChunkX + dx;
+                int chunkZ = playerChunkZ + dz;
+                ChunkPos chunkPos = new ChunkPos(chunkX, chunkZ);
+
+                // Try to get the chunk
+                LevelChunk chunk = level.getChunk(chunkX, chunkZ);
+                if (chunk == null) {
+                    continue;
+                }
+
+                // Skip if already scanned
+                Set<ChunkPos> scanned = scannedChunks.computeIfAbsent(dimension, k -> ConcurrentHashMap.newKeySet());
+                if (scanned.contains(chunkPos)) {
+                    continue;
+                }
+
+                // Scan this chunk for portals
+                scanChunk(level, chunk, dimension);
+                scanned.add(chunkPos);
             }
-
-            // Scan this chunk for portals
-            scanChunk(level, chunk, dimension);
-            scanned.add(chunkPos);
         }
     }
 
@@ -95,7 +117,7 @@ public class PortalManager {
         // Scan the chunk
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
-                for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++) {
+                for (int y = level.getMinY(); y < level.getMaxY(); y++) {
                     BlockPos pos = new BlockPos(x, y, z);
 
                     if (processedPositions.contains(pos)) {
@@ -158,7 +180,7 @@ public class PortalManager {
         BlockPos.MutableBlockPos mutable = pos.mutable();
 
         // Go down until we hit non-portal block
-        while (mutable.getY() > level.getMinBuildHeight() && level.getBlockState(mutable).is(Blocks.NETHER_PORTAL)) {
+        while (mutable.getY() > level.getMinY() && level.getBlockState(mutable).is(Blocks.NETHER_PORTAL)) {
             mutable.move(0, -1, 0);
         }
 
