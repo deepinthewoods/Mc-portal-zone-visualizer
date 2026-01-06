@@ -64,9 +64,9 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
             }
         });
 
-        // Clear portals when world changes
+        // Clear portals only after fully disconnecting from a world/server
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (client.level == null) {
+            if (client.level == null && client.getConnection() == null) {
                 PortalManager.getInstance().clear();
             }
         });

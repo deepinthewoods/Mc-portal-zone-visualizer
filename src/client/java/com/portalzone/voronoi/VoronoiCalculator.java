@@ -22,8 +22,8 @@ public class VoronoiCalculator {
     private static final VoronoiCalculator INSTANCE = new VoronoiCalculator();
 
     // Voronoi calculation parameters
-    private static final int SAMPLE_SPACING = 4; // Sample every 4 blocks for performance
-    private static final int LOCAL_RADIUS = 64; // Only calculate within 64 blocks of player
+    private static final int SAMPLE_SPACING = 2; // Sample every 1 block
+    private static final int LOCAL_RADIUS = 128;
 
     // Cached Voronoi edges
     private final List<VoronoiEdge> cachedEdges = new ArrayList<>();

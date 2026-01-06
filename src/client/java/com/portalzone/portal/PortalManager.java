@@ -53,8 +53,6 @@ public class PortalManager {
         // Scan chunks in current dimension
         scanLoadedChunks(level);
 
-        System.out.println("DEBUG: Total portals tracked: " + getAllPortals().size());
-
         // TODO: Scan chunks in the other dimension
         // This requires loading chunks from the other dimension
         // We'll implement this in the cross-dimension scanning task
@@ -114,9 +112,6 @@ public class PortalManager {
             }
         }
 
-        if (chunksScanned > 0) {
-            System.out.println("DEBUG: Scanned " + chunksScanned + " new chunks out of " + chunksToScan + " available");
-        }
     }
 
     /**
@@ -131,8 +126,6 @@ public class PortalManager {
 
         Set<BlockPos> processedPositions = new HashSet<>();
 
-        System.out.println("DEBUG: Scanning chunk " + chunkPos + " in dimension " + dimension.location());
-
         // Scan the chunk
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
@@ -145,14 +138,10 @@ public class PortalManager {
 
                     BlockState state = level.getBlockState(pos);
                     if (state.is(Blocks.NETHER_PORTAL)) {
-                        System.out.println("DEBUG: Found portal block at " + pos);
                         // Found a portal block, try to identify the portal structure
                         PortalInfo portal = identifyPortal(level, pos, processedPositions);
                         if (portal != null) {
-                            System.out.println("DEBUG: Successfully identified portal at " + portal.position);
                             addPortal(dimension, portal);
-                        } else {
-                            System.out.println("DEBUG: Failed to identify portal structure at " + pos);
                         }
                     }
                 }
@@ -178,9 +167,15 @@ public class PortalManager {
             return null;
         }
 
+        // Find the leftmost portal block so width is measured consistently
+        BlockPos minPos = findPortalMinAlongAxis(level, bottomPos, axis);
+        BlockPos maxPos = findPortalMaxAlongAxis(level, bottomPos, axis);
+
         // Measure portal dimensions
-        int width = measurePortalWidth(level, bottomPos, axis);
-        int height = measurePortalHeight(level, bottomPos);
+        int width = axis == PortalInfo.Axis.X
+            ? (maxPos.getX() - minPos.getX() + 1)
+            : (maxPos.getZ() - minPos.getZ() + 1);
+        int height = measurePortalHeight(level, minPos);
 
         if (width < 2 || height < 3) {
             processedPositions.add(startPos);
@@ -188,10 +183,10 @@ public class PortalManager {
         }
 
         // Mark all portal blocks as processed
-        markPortalProcessed(level, bottomPos, axis, width, height, processedPositions);
+        markPortalProcessed(level, minPos, axis, width, height, processedPositions);
 
         // Calculate center position
-        BlockPos centerPos = calculatePortalCenter(bottomPos, axis, width, height);
+        BlockPos centerPos = calculatePortalCenter(minPos, axis, width, height);
 
         return new PortalInfo(centerPos, level.dimension(), axis, width, height);
     }
@@ -226,7 +221,19 @@ public class PortalManager {
             return null;
         }
 
-        // Check the axis property
+        boolean hasXNeighbor = level.getBlockState(pos.east()).is(Blocks.NETHER_PORTAL)
+            || level.getBlockState(pos.west()).is(Blocks.NETHER_PORTAL);
+        boolean hasZNeighbor = level.getBlockState(pos.north()).is(Blocks.NETHER_PORTAL)
+            || level.getBlockState(pos.south()).is(Blocks.NETHER_PORTAL);
+
+        if (hasXNeighbor && !hasZNeighbor) {
+            return PortalInfo.Axis.X;
+        }
+        if (hasZNeighbor && !hasXNeighbor) {
+            return PortalInfo.Axis.Z;
+        }
+
+        // Fall back to the axis property if neighbors are ambiguous
         try {
             net.minecraft.core.Direction.Axis axis = state.getValue(NetherPortalBlock.AXIS);
             return axis == net.minecraft.core.Direction.Axis.X ? PortalInfo.Axis.X : PortalInfo.Axis.Z;
@@ -236,14 +243,35 @@ public class PortalManager {
     }
 
     /**
-     * Measure portal width
+     * Find the leftmost portal block along the width axis
      */
-    private int measurePortalWidth(ClientLevel level, BlockPos bottomPos, PortalInfo.Axis axis) {
-        int width = 0;
+    private BlockPos findPortalMinAlongAxis(ClientLevel level, BlockPos bottomPos, PortalInfo.Axis axis) {
         BlockPos.MutableBlockPos mutable = bottomPos.mutable();
 
         while (level.getBlockState(mutable).is(Blocks.NETHER_PORTAL)) {
-            width++;
+            if (axis == PortalInfo.Axis.X) {
+                mutable.move(-1, 0, 0);
+            } else {
+                mutable.move(0, 0, -1);
+            }
+        }
+
+        if (axis == PortalInfo.Axis.X) {
+            mutable.move(1, 0, 0);
+        } else {
+            mutable.move(0, 0, 1);
+        }
+
+        return mutable.immutable();
+    }
+
+    /**
+     * Find the rightmost portal block along the width axis
+     */
+    private BlockPos findPortalMaxAlongAxis(ClientLevel level, BlockPos bottomPos, PortalInfo.Axis axis) {
+        BlockPos.MutableBlockPos mutable = bottomPos.mutable();
+
+        while (level.getBlockState(mutable).is(Blocks.NETHER_PORTAL)) {
             if (axis == PortalInfo.Axis.X) {
                 mutable.move(1, 0, 0);
             } else {
@@ -251,7 +279,13 @@ public class PortalManager {
             }
         }
 
-        return width;
+        if (axis == PortalInfo.Axis.X) {
+            mutable.move(-1, 0, 0);
+        } else {
+            mutable.move(0, 0, -1);
+        }
+
+        return mutable.immutable();
     }
 
     /**
