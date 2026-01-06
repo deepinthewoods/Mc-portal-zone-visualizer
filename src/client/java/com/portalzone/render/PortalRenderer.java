@@ -56,6 +56,7 @@ public class PortalRenderer {
         // Render portals in other dimension (as X marks with translated coordinates)
         ResourceKey<Level> otherDim = currentDim == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
         Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
+
         for (PortalInfo portal : otherDimPortals) {
             Vec3 translatedPos = portal.getTranslatedPos();
             double distance = translatedPos.distanceTo(camPos);

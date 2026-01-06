@@ -96,9 +96,6 @@ public class PortalManager {
         // Scan chunks in a radius around the player
         int chunkRadius = mc.options.renderDistance().get();
 
-        int chunksToScan = 0;
-        int chunksScanned = 0;
-
         for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
             for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
                 int chunkX = playerChunkX + dx;
@@ -116,8 +113,6 @@ public class PortalManager {
                     continue;
                 }
 
-                chunksToScan++;
-
                 // Skip if already scanned
                 Set<ChunkPos> scanned = scannedChunks.computeIfAbsent(dimension, k -> ConcurrentHashMap.newKeySet());
                 if (scanned.contains(chunkPos)) {
@@ -125,12 +120,10 @@ public class PortalManager {
                 }
 
                 // Scan this chunk for portals
-                chunksScanned++;
                 scanChunk(level, chunk, dimension);
                 scanned.add(chunkPos);
             }
         }
-
     }
 
     /**

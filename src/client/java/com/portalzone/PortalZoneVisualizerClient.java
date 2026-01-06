@@ -65,10 +65,17 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
         });
 
         // Clear portals only after fully disconnecting from a world/server
+        // Track the last connection state to detect true disconnects
+        final boolean[] wasConnected = {false};
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (client.level == null && client.getConnection() == null) {
+            boolean isConnected = client.level != null || client.getConnection() != null;
+
+            // Only clear when we transition from connected to fully disconnected
+            if (wasConnected[0] && !isConnected) {
                 PortalManager.getInstance().clear();
             }
+
+            wasConnected[0] = isConnected;
         });
 
         WorldRenderEvents.BEFORE_DEBUG_RENDER.register(context -> {
