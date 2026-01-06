@@ -1,4 +1,6 @@
 {
   "key.portal-zone-visualizer.toggle": "Toggle Portal Visualization",
-  "category.portal-zone-visualizer": "Portal Zone Visualizer"
+  "key.portal-zone-visualizer.manage": "Portal Management",
+  "category.portal-zone-visualizer": "Portal Zone Visualizer",
+  "gui.portal-zone-visualizer.portal_list": "Portal Management"
 }
