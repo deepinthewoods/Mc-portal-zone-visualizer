@@ -59,6 +59,16 @@ public class PortalManager {
     // Depth testing settings
     private boolean portalMarkersAlwaysVisible = true; // Default: always visible
     private boolean bordersAlwaysVisible = false; // Default: respect occlusion
+    private boolean showNeutralBorders = true; // Default: show grey borders
+    private boolean showVerticalBorders = false; // Default: no vertical border lines
+    private float minimumMarkerScreenPercent = 2.0f; // Default: 2% of long screen side
+    private float borderFuzzThreshold = 0.0f; // Default: no fuzz
+    private int borderFuzzStartDistance = 64; // Default: start fading at 64 blocks
+
+    // Draw distance settings
+    private static final double INFINITE_DRAW_DISTANCE = -1.0; // Special value for infinite distance
+    private double portalMarkerDrawDistance = INFINITE_DRAW_DISTANCE; // Default: infinite
+    private double borderDrawDistance = 2048.0; // Default: 2048 blocks
 
     private PortalManager() {
         this.configPath = FabricLoader.getInstance().getConfigDir().resolve(CONFIG_FILE);
@@ -597,6 +607,144 @@ public class PortalManager {
         return bordersAlwaysVisible;
     }
 
+    /**
+     * Set whether neutral (grey) borders should be rendered
+     */
+    public void setNeutralBordersEnabled(boolean enabled) {
+        this.showNeutralBorders = enabled;
+        portalsChanged = true;
+    }
+
+    /**
+     * Get whether neutral (grey) borders should be rendered
+     */
+    public boolean isNeutralBordersEnabled() {
+        return showNeutralBorders;
+    }
+
+    /**
+     * Set whether vertical border lines should be rendered
+     */
+    public void setVerticalBordersEnabled(boolean enabled) {
+        this.showVerticalBorders = enabled;
+        portalsChanged = true;
+    }
+
+    /**
+     * Get whether vertical border lines should be rendered
+     */
+    public boolean isVerticalBordersEnabled() {
+        return showVerticalBorders;
+    }
+
+    /**
+     * Set the minimum portal marker screen size (percent of long screen side)
+     */
+    public void setMinimumMarkerScreenPercent(float percent) {
+        float clamped = Math.max(0.0f, Math.min(20.0f, percent));
+        this.minimumMarkerScreenPercent = clamped;
+    }
+
+    /**
+     * Get the minimum portal marker screen size (percent of long screen side)
+     */
+    public float getMinimumMarkerScreenPercent() {
+        return minimumMarkerScreenPercent;
+    }
+
+    /**
+     * Set the maximum border fuzz discard probability (0-1).
+     */
+    public void setBorderFuzzThreshold(float threshold) {
+        this.borderFuzzThreshold = Math.max(0.0f, Math.min(1.0f, threshold));
+    }
+
+    /**
+     * Get the maximum border fuzz discard probability (0-1).
+     */
+    public float getBorderFuzzThreshold() {
+        return borderFuzzThreshold;
+    }
+
+    /**
+     * Set the distance (blocks) where border fuzz begins.
+     */
+    public void setBorderFuzzStartDistance(int distance) {
+        this.borderFuzzStartDistance = Math.max(4, Math.min(256, distance));
+    }
+
+    /**
+     * Get the distance (blocks) where border fuzz begins.
+     */
+    public int getBorderFuzzStartDistance() {
+        return borderFuzzStartDistance;
+    }
+
+    /**
+     * Set the portal marker draw distance (in blocks).
+     * Use -1 for infinite distance.
+     */
+    public void setPortalMarkerDrawDistance(double distance) {
+        this.portalMarkerDrawDistance = distance;
+    }
+
+    /**
+     * Get the portal marker draw distance (in blocks).
+     * Returns -1 for infinite distance.
+     */
+    public double getPortalMarkerDrawDistance() {
+        return portalMarkerDrawDistance;
+    }
+
+    /**
+     * Check if portal marker draw distance is infinite.
+     */
+    public boolean isPortalMarkerDrawDistanceInfinite() {
+        return portalMarkerDrawDistance == INFINITE_DRAW_DISTANCE;
+    }
+
+    /**
+     * Set the border draw distance (in blocks).
+     */
+    public void setBorderDrawDistance(double distance) {
+        this.borderDrawDistance = Math.max(16.0, Math.min(2048.0, distance));
+    }
+
+    /**
+     * Get the border draw distance (in blocks).
+     */
+    public double getBorderDrawDistance() {
+        return borderDrawDistance;
+    }
+
+    /**
+     * Clear all portals in the current dimension (removes from live and persisted)
+     */
+    public void clearCurrentDimension(ResourceKey<Level> dimension) {
+        // Clear live portals
+        portalsByDimension.remove(dimension);
+
+        // Clear persisted portals
+        persistedPortals.remove(dimension);
+
+        // Clear scanned chunks
+        scannedChunks.remove(dimension);
+
+        portalsChanged = true;
+        saveSettingsNow();
+    }
+
+    /**
+     * Clear all portals in all dimensions
+     */
+    public void clearAllPortals() {
+        portalsByDimension.clear();
+        persistedPortals.clear();
+        scannedChunks.clear();
+        portalsChanged = true;
+        saveSettingsNow();
+    }
+
     private void loadSettings() {
         if (!Files.exists(configPath)) {
             return;
@@ -624,6 +772,27 @@ public class PortalManager {
             }
             if (root.has("bordersAlwaysVisible")) {
                 bordersAlwaysVisible = root.get("bordersAlwaysVisible").getAsBoolean();
+            }
+            if (root.has("showNeutralBorders")) {
+                showNeutralBorders = root.get("showNeutralBorders").getAsBoolean();
+            }
+            if (root.has("showVerticalBorders")) {
+                showVerticalBorders = root.get("showVerticalBorders").getAsBoolean();
+            }
+            if (root.has("minimumMarkerScreenPercent")) {
+                setMinimumMarkerScreenPercent(root.get("minimumMarkerScreenPercent").getAsFloat());
+            }
+            if (root.has("borderFuzzThreshold")) {
+                setBorderFuzzThreshold(root.get("borderFuzzThreshold").getAsFloat());
+            }
+            if (root.has("borderFuzzStartDistance")) {
+                setBorderFuzzStartDistance(root.get("borderFuzzStartDistance").getAsInt());
+            }
+            if (root.has("portalMarkerDrawDistance")) {
+                setPortalMarkerDrawDistance(root.get("portalMarkerDrawDistance").getAsDouble());
+            }
+            if (root.has("borderDrawDistance")) {
+                setBorderDrawDistance(root.get("borderDrawDistance").getAsDouble());
             }
 
             // Load persisted portals
@@ -678,6 +847,15 @@ public class PortalManager {
         // Save depth testing settings
         root.addProperty("portalMarkersAlwaysVisible", portalMarkersAlwaysVisible);
         root.addProperty("bordersAlwaysVisible", bordersAlwaysVisible);
+        root.addProperty("showNeutralBorders", showNeutralBorders);
+        root.addProperty("showVerticalBorders", showVerticalBorders);
+        root.addProperty("minimumMarkerScreenPercent", minimumMarkerScreenPercent);
+        root.addProperty("borderFuzzThreshold", borderFuzzThreshold);
+        root.addProperty("borderFuzzStartDistance", borderFuzzStartDistance);
+
+        // Save draw distance settings
+        root.addProperty("portalMarkerDrawDistance", portalMarkerDrawDistance);
+        root.addProperty("borderDrawDistance", borderDrawDistance);
 
         // Save persisted portals
         JsonObject portalsJson = new JsonObject();

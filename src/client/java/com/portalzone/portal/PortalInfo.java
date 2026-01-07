@@ -75,28 +75,41 @@ public class PortalInfo {
      * Get the center position of the portal as a Vec3
      */
     public Vec3 getCenterPos() {
-        return new Vec3(position.getX() + 0.5, position.getY() + 0.5, position.getZ() + 0.5);
+        double x = position.getX() + 0.5;
+        double y = position.getY() + 0.5;
+        double z = position.getZ() + 0.5;
+
+        if (width % 2 == 0) {
+            if (orientation == Axis.X) {
+                x -= 0.5;
+            } else {
+                z -= 0.5;
+            }
+        }
+
+        if (height % 2 == 0) {
+            y -= 0.5;
+        }
+
+        return new Vec3(x, y, z);
     }
 
     /**
      * Get the translated position in the other dimension
      */
     public Vec3 getTranslatedPos() {
-        boolean isNether = dimension == Level.NETHER;
+        boolean isNether = Level.NETHER.equals(dimension);
         double scale = isNether ? 8.0 : 0.125;
 
-        return new Vec3(
-            position.getX() * scale + 0.5,
-            position.getY() + 0.5,
-            position.getZ() * scale + 0.5
-        );
+        Vec3 center = getCenterPos();
+        return new Vec3(center.x * scale, center.y, center.z * scale);
     }
 
     /**
      * Get the dimension this portal links to
      */
     public ResourceKey<Level> getLinkedDimension() {
-        return dimension == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
+        return Level.NETHER.equals(dimension) ? Level.OVERWORLD : Level.NETHER;
     }
 
     /**

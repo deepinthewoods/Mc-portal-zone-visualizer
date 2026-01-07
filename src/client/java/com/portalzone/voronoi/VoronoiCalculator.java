@@ -15,8 +15,13 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Calculates and renders 3D Voronoi cell borders for portal zones
@@ -24,25 +29,34 @@ import java.util.Set;
 public class VoronoiCalculator {
     private static final VoronoiCalculator INSTANCE = new VoronoiCalculator();
 
-    // Voronoi calculation parameters
-    private static final int SAMPLE_SPACING = 1; // Sample every 1 block
-    private static final int LOCAL_RADIUS = 128;
-
     // LOD (Level of Detail) constants
-    private static final int HIGH_DETAIL_RADIUS = 64; // blocks from player
-    private static final int HIGH_DETAIL_SPACING = 1; // 1 block resolution
-    private static final int LOW_DETAIL_SPACING = 4; // 4 block resolution
+    private static final int MAX_BORDER_DISTANCE = 2048; // Increase to render farther borders.
+    private static final int[] BASE_LOD_RADII = new int[] {128, 256, 512, MAX_BORDER_DISTANCE};
+    private static final int[] LOD_SPACING = new int[] {1, 2, 4, 8, 16};
+    private static final int TILE_SIZE = 128;
 
     // Neutral zone color (for areas with no portal in range)
     private static final Vector3f NEUTRAL_ZONE_COLOR = new Vector3f(0.8f, 0.8f, 0.8f);
+    private static final int SKIP_INDEX = -2;
+    private static final double BORDER_OFFSET = 1.0 / 16.0;
 
     // Cached Voronoi edges
-    private final List<VoronoiEdge> cachedEdges = new ArrayList<>();
-    private ResourceKey<Level> cachedDimension = null;
-    private Vec3 cachedPlayerPos = null;
+    private final AtomicReference<ConcurrentLinkedQueue<VoronoiEdge>> cachedEdges =
+        new AtomicReference<>(new ConcurrentLinkedQueue<>());
+    private volatile ResourceKey<Level> cachedDimension = null;
+    private volatile Vec3 cachedPlayerPos = null;
+    private volatile ResourceKey<Level> lastRequestedDimension = null;
+    private volatile Vec3 lastRequestedPlayerPos = null;
+    private final Object recalcLock = new Object();
+    private RecalcRequest pendingRequest = null;
+    private final AtomicLong requestId = new AtomicLong();
+    private volatile long latestRequestId = 0;
     private static final double RECALC_DISTANCE_THRESHOLD = 32.0; // Recalculate if player moves 32 blocks
 
     private VoronoiCalculator() {
+        Thread worker = new Thread(this::recalcLoop, "PortalZoneVoronoiWorker");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     public static VoronoiCalculator getInstance() {
@@ -61,10 +75,19 @@ public class VoronoiCalculator {
                            || camPos.distanceTo(cachedPlayerPos) > RECALC_DISTANCE_THRESHOLD;
 
         if (needsRecalc) {
-            recalculateVoronoi(camPos, currentDim);
-            PortalManager.getInstance().clearChangedFlag();
-            cachedDimension = currentDim;
-            cachedPlayerPos = camPos;
+            if (shouldQueueRecalc(camPos, currentDim)) {
+                RecalcRequest request = buildRecalcRequest(camPos, currentDim);
+                if (request != null) {
+                    queueRecalc(request);
+                } else {
+                    cachedEdges.set(new ConcurrentLinkedQueue<>());
+                    cachedDimension = currentDim;
+                    cachedPlayerPos = camPos;
+                }
+                PortalManager.getInstance().clearChangedFlag();
+                lastRequestedDimension = currentDim;
+                lastRequestedPlayerPos = camPos;
+            }
         }
 
         // Calculate normal from camera forward vector (pointing toward camera)
@@ -75,9 +98,14 @@ public class VoronoiCalculator {
         // Render borders with depth control
         boolean bordersAlwaysVisible = PortalManager.getInstance().isBordersAlwaysVisible();
         boolean bordersUseDepth = !bordersAlwaysVisible;
+        float borderFuzzThreshold = PortalManager.getInstance().getBorderFuzzThreshold();
+        int fuzzStartDistance = PortalManager.getInstance().getBorderFuzzStartDistance();
 
         // Render cached edges with world coordinates (PoseStack is already camera-relative)
-        for (VoronoiEdge edge : cachedEdges) {
+        for (VoronoiEdge edge : cachedEdges.get()) {
+            if (!shouldRenderEdge(edge, camPos, borderFuzzThreshold, fuzzStartDistance)) {
+                continue;
+            }
             Vector3f color = edge.color;
 
             PortalRenderer.submitLine(matrices, bufferSource,
@@ -94,14 +122,14 @@ public class VoronoiCalculator {
      * Calculate dynamic max distance based on portal locations
      * Returns the distance to render Voronoi borders, based on furthest portal + margin
      */
-    private int calculateMaxDistance(java.util.Collection<PortalInfo> portals, Vec3 playerPos) {
-        if (portals.isEmpty()) {
+    private int calculateMaxDistance(Vec3[] portalPositions, Vec3 playerPos) {
+        if (portalPositions.length == 0) {
             return 256; // Minimum distance
         }
 
         double maxDistance = 0.0;
-        for (PortalInfo portal : portals) {
-            double distance = portal.getCenterPos().distanceTo(playerPos);
+        for (Vec3 portalPos : portalPositions) {
+            double distance = portalPos.distanceTo(playerPos);
             if (distance > maxDistance) {
                 maxDistance = distance;
             }
@@ -110,143 +138,90 @@ public class VoronoiCalculator {
         // Add margin beyond furthest portal
         int calculatedDistance = (int) Math.ceil(maxDistance + 128.0);
 
-        // Clamp to min/max bounds
-        return Math.max(256, Math.min(2048, calculatedDistance));
+        // Ensure we cover the full configured render distance
+        return Math.max(MAX_BORDER_DISTANCE, Math.max(256, calculatedDistance));
     }
 
     /**
-     * Recalculate Voronoi borders with 2-tier LOD system
+     * Recalculate Voronoi borders with multi-tier LOD system
      */
-    private void recalculateVoronoi(Vec3 playerPos, ResourceKey<Level> currentDim) {
-        cachedEdges.clear();
-
-        // Get portals from the OTHER dimension (the ones we would link to)
-        ResourceKey<Level> otherDim = currentDim == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
-        Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
-        Set<PortalInfo> portalSource = otherDimPortals;
-        boolean useTranslatedPositions = true;
-
-        if (portalSource.size() < 2) {
-            // Fallback to current dimension portals so borders still render
-            portalSource = PortalManager.getInstance().getPortalsInDimension(currentDim);
-            useTranslatedPositions = false;
+    private boolean recalculateVoronoi(RecalcRequest request, ConcurrentLinkedQueue<VoronoiEdge> edgesQueue) {
+        int portalCount = request.portalCenters.length;
+        if (portalCount < 2) {
+            return true;
         }
 
-        if (portalSource.size() < 2) {
-            // Need at least 2 portals to have borders
-            return;
-        }
+        int[] lodRadii = buildLodRadii(PortalManager.getInstance().getBorderFuzzStartDistance());
 
         // Calculate dynamic max distance based on portal locations
-        int maxDistance = calculateMaxDistance(portalSource, playerPos);
+        int maxDistance = calculateMaxDistance(request.portalTranslated, request.playerPos);
 
-        // Convert to list for easier indexing
-        List<PortalInfo> portalList = new ArrayList<>(portalSource);
-        int portalCount = portalList.size();
-        PortalInfo[] portals = portalList.toArray(new PortalInfo[0]);
         double[] portalX = new double[portalCount];
         double[] portalY = new double[portalCount];
         double[] portalZ = new double[portalCount];
         for (int i = 0; i < portalCount; i++) {
-            PortalInfo portal = portals[i];
-            Vec3 portalPos = useTranslatedPositions ? portal.getTranslatedPos() : portal.getCenterPos();
+            Vec3 portalPos = request.portalCenters[i];
             portalX[i] = portalPos.x;
             portalY[i] = portalPos.y;
             portalZ[i] = portalPos.z;
         }
 
-        // === INNER ZONE: High detail (0-64 blocks, 1-block spacing) ===
-        List<VoronoiEdge> innerEdges = calculateVoronoiZone(
-            playerPos, portals, portalX, portalY, portalZ,
-            HIGH_DETAIL_RADIUS, HIGH_DETAIL_SPACING,
-            currentDim, otherDim, portalList
-        );
+        int minRadius = 0;
+        for (int i = 0; i < lodRadii.length; i++) {
+            int maxRadius = Math.min(lodRadii[i], maxDistance);
+            if (maxRadius <= minRadius) {
+                continue;
+            }
 
-        // === OUTER ZONE: Low detail (64-maxDistance blocks, 4-block spacing) ===
-        List<VoronoiEdge> outerEdges = calculateVoronoiZone(
-            playerPos, portals, portalX, portalY, portalZ,
-            maxDistance, LOW_DETAIL_SPACING,
-            currentDim, otherDim, portalList
-        );
+            int spacing = LOD_SPACING[i];
 
-        // Merge edge lists
-        cachedEdges.addAll(innerEdges);
-        cachedEdges.addAll(outerEdges);
+            // Create overlap: each LOD (except first) extends inward by one spacing unit
+            int effectiveMinRadius = minRadius;
+            if (i > 0 && spacing > 0) {
+                effectiveMinRadius = Math.max(0, minRadius - spacing);
+            }
+
+            boolean success;
+            // Use rectangular grid for all LODs; spacing scales with distance.
+            success = calculateVoronoiZonesRectangular(
+                request, portalX, portalY, portalZ,
+                effectiveMinRadius, maxRadius, spacing, edgesQueue);
+
+            if (!success) {
+                return false;
+            }
+            minRadius = maxRadius;
+        }
+
+        if (minRadius < maxDistance) {
+            int spacing = LOD_SPACING[LOD_SPACING.length - 1];
+            // Create overlap with previous LOD
+            int effectiveMinRadius = Math.max(0, minRadius - spacing);
+            if (!calculateVoronoiZonesRectangular(
+                request, portalX, portalY, portalZ,
+                effectiveMinRadius, maxDistance, spacing, edgesQueue)) {
+                return false;
+            }
+        }
 
         System.out.println("[Voronoi] portals=" + portalCount
-            + " edges=" + cachedEdges.size()
-            + " (inner=" + innerEdges.size() + " outer=" + outerEdges.size() + ")"
+            + " edges=" + edgesQueue.size()
             + " maxDist=" + maxDistance);
+        return true;
     }
 
-    /**
-     * Calculate Voronoi edges for a specific zone with given radius and spacing
-     */
-    private List<VoronoiEdge> calculateVoronoiZone(Vec3 playerPos, PortalInfo[] portals,
-                                                     double[] portalX, double[] portalY, double[] portalZ,
-                                                     int radius, int spacing,
-                                                     ResourceKey<Level> currentDim, ResourceKey<Level> otherDim,
-                                                     List<PortalInfo> portalList) {
-        List<VoronoiEdge> edges = new ArrayList<>();
-
-        // Sample points in 3D space around the player
-        // Align to world grid to prevent borders from shifting as player moves
-        int minX = (int) Math.floor((playerPos.x - radius) / spacing) * spacing;
-        int maxX = (int) Math.ceil((playerPos.x + radius) / spacing) * spacing;
-        int minY = Math.max((int) Math.floor((playerPos.y - radius) / spacing) * spacing, -64);
-        int maxY = Math.min((int) Math.ceil((playerPos.y + radius) / spacing) * spacing, 320);
-        int minZ = (int) Math.floor((playerPos.z - radius) / spacing) * spacing;
-        int maxZ = (int) Math.ceil((playerPos.z + radius) / spacing) * spacing;
-
-        int xCount = ((maxX - minX) / spacing) + 1;
-        int yCount = ((maxY - minY) / spacing) + 1;
-        int zCount = ((maxZ - minZ) / spacing) + 1;
-        int[] nearestPortalIdx = new int[xCount * yCount * zCount];
-        Arrays.fill(nearestPortalIdx, -1);
-
-        // For each sample point, find the linked portal using Minecraft's portal linking algorithm
-        for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
-            for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
-                for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
-                    int nearest = findNearestPortalIndex(x, y, z, currentDim, portalList);
-                    int index = ((ix * yCount) + iy) * zCount + iz;
-                    nearestPortalIdx[index] = nearest; // -1 if no portal in range
-                }
-            }
+    private static int[] buildLodRadii(int lod0Max) {
+        int clamped = Math.max(4, Math.min(MAX_BORDER_DISTANCE, lod0Max));
+        int[] radii = new int[LOD_SPACING.length];
+        radii[0] = clamped;
+        for (int i = 1; i < radii.length; i++) {
+            int baseIndex = Math.min(i - 1, BASE_LOD_RADII.length - 1);
+            int candidate = BASE_LOD_RADII[baseIndex];
+            radii[i] = Math.max(candidate, radii[i - 1]);
         }
-
-        // Find edges where the nearest portal changes
-        for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
-            for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
-                for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
-                    int index = ((ix * yCount) + iy) * zCount + iz;
-                    int portalIndex = nearestPortalIdx[index];
-                    if (portalIndex < 0) {
-                        continue;
-                    }
-
-                    // Check neighbors in +X, +Y, +Z directions
-                    if (ix + 1 < xCount) {
-                        checkAndAddEdgeToList(edges, nearestPortalIdx, portals, index,
-                            ((ix + 1) * yCount + iy) * zCount + iz,
-                            x, y, z, x + spacing, y, z);
-                    }
-                    if (iy + 1 < yCount) {
-                        checkAndAddEdgeToList(edges, nearestPortalIdx, portals, index,
-                            (ix * yCount + (iy + 1)) * zCount + iz,
-                            x, y, z, x, y + spacing, z);
-                    }
-                    if (iz + 1 < zCount) {
-                        checkAndAddEdgeToList(edges, nearestPortalIdx, portals, index,
-                            (ix * yCount + iy) * zCount + (iz + 1),
-                            x, y, z, x, y, z + spacing);
-                    }
-                }
-            }
-        }
-
-        return edges;
+        return radii;
     }
+
 
     /**
      * Find which portal would be linked from a given position using Minecraft's portal linking algorithm
@@ -254,79 +229,60 @@ public class VoronoiCalculator {
      */
     private int findNearestPortalIndex(double x, double y, double z,
                                        ResourceKey<Level> currentDim,
-                                       List<PortalInfo> destinationPortals) {
-        Vec3 sourcePos = new Vec3(x, y, z);
-
-        // Use the portal linking algorithm to find which portal this position would link to
-        PortalInfo linkedPortal = PortalLinkingAlgorithm.findLinkedPortal(
-            sourcePos, currentDim, destinationPortals
-        );
-
-        // If no portal in range, return -1 (neutral zone)
-        if (linkedPortal == null) {
+                                       Vec3[] destinationPortals,
+                                       double[] portalX, double[] portalY, double[] portalZ,
+                                       boolean useLinkingAlgorithm) {
+        if (destinationPortals.length == 0) {
             return -1;
         }
 
-        // Find the index of the linked portal in the list
-        return destinationPortals.indexOf(linkedPortal);
-    }
-
-    /**
-     * Check if there's an edge between two sample points and add it to a specific list
-     * Supports neutral zones: if one side is -1 (no portal in range), creates a neutral-colored edge
-     */
-    private void checkAndAddEdgeToList(List<VoronoiEdge> edgeList, int[] nearestPortalIdx, PortalInfo[] portals,
-                                       int index1, int index2, int x1, int y1, int z1, int x2, int y2, int z2) {
-        int portal1Index = nearestPortalIdx[index1];
-        int portal2Index = nearestPortalIdx[index2];
-
-        // Check if there's a boundary between different zones
-        if (portal1Index != portal2Index) {
-            Vec3 start = new Vec3(x1, y1, z1);
-            Vec3 end = new Vec3(x2, y2, z2);
-
-            Vector3f color;
-            if (portal1Index == -1 || portal2Index == -1) {
-                // One side has no portal in range - use neutral color
-                color = NEUTRAL_ZONE_COLOR;
-            } else {
-                // Both sides have portals - use the color of portal1
-                color = PortalManager.getInstance().getPortalColor(portals[portal1Index]);
+        if (!useLinkingAlgorithm) {
+            int nearestIndex = -1;
+            double nearestDistance = Double.MAX_VALUE;
+            for (int i = 0; i < destinationPortals.length; i++) {
+                double dx = portalX[i] - x;
+                double dy = portalY[i] - y;
+                double dz = portalZ[i] - z;
+                double distance = dx * dx + dy * dy + dz * dz;
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestIndex = i;
+                }
             }
-
-            edgeList.add(new VoronoiEdge(start, end, color));
+            return nearestIndex;
         }
+
+        // Compare in current dimension coordinates with current dimension's search radius
+        Vec3 sourcePos = new Vec3(x, y, z);
+        int searchRadius = PortalLinkingAlgorithm.getSearchRadius(currentDim);
+
+        int nearestIndex = -1;
+        double nearestDistance = Double.MAX_VALUE;
+        for (int i = 0; i < destinationPortals.length; i++) {
+            // destinationPortals are already translated to current dimension coordinates
+            double horizontal = PortalLinkingAlgorithm.horizontalDistance(sourcePos, destinationPortals[i]);
+            if (horizontal <= searchRadius) {
+                double distance = PortalLinkingAlgorithm.distance3d(sourcePos, destinationPortals[i]);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestIndex = i;
+                }
+            }
+        }
+
+        return nearestIndex;
     }
 
-    /**
-     * Check if there's an edge between two sample points and add it if so
-     * @deprecated Use checkAndAddEdgeToList instead
-     */
-    @Deprecated
-    private void checkAndAddEdge(int[] nearestPortalIdx, PortalInfo[] portals, int index1, int index2,
-                                 int x1, int y1, int z1, int x2, int y2, int z2) {
-        int portal1Index = nearestPortalIdx[index1];
-        int portal2Index = nearestPortalIdx[index2];
-
-        if (portal1Index >= 0 && portal2Index >= 0 && portal1Index != portal2Index) {
-            // Edge found! Add it
-            Vec3 start = new Vec3(x1, y1, z1);
-            Vec3 end = new Vec3(x2, y2, z2);
-
-            // Use the color of portal1 (or could blend both)
-            Vector3f color = PortalManager.getInstance().getPortalColor(portals[portal1Index]);
-
-            cachedEdges.add(new VoronoiEdge(start, end, color));
-        }
-    }
 
     /**
      * Clear cached data
      */
     public void clear() {
-        cachedEdges.clear();
+        cachedEdges.set(new ConcurrentLinkedQueue<>());
         cachedDimension = null;
         cachedPlayerPos = null;
+        lastRequestedDimension = null;
+        lastRequestedPlayerPos = null;
     }
 
     /**
@@ -336,11 +292,579 @@ public class VoronoiCalculator {
         final Vec3 start;
         final Vec3 end;
         final Vector3f color;
+        final int spacing;
+        final boolean alwaysRender;
+        final int hash;
 
-        VoronoiEdge(Vec3 start, Vec3 end, Vector3f color) {
+        VoronoiEdge(Vec3 start, Vec3 end, Vector3f color, int spacing) {
             this.start = start;
             this.end = end;
             this.color = color;
+            this.spacing = spacing;
+            this.alwaysRender = spacing == 1;
+            this.hash = hashEdge(start, end);
+        }
+    }
+
+
+    /**
+     * Calculate Voronoi edges using rectangular grid.
+     */
+    private boolean calculateVoronoiZonesRectangular(RecalcRequest request,
+                                                     double[] portalX, double[] portalY, double[] portalZ,
+                                                     int minRadius, int maxRadius, int spacing,
+                                                     ConcurrentLinkedQueue<VoronoiEdge> edgesQueue) {
+        Vec3 playerPos = request.playerPos;
+        int minX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
+        int maxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
+        int minY = Math.max((int) Math.floor((playerPos.y - maxRadius) / spacing) * spacing, -64);
+        int maxY = Math.min((int) Math.ceil((playerPos.y + maxRadius) / spacing) * spacing, 320);
+        int minZ = (int) Math.floor((playerPos.z - maxRadius) / spacing) * spacing;
+        int maxZ = (int) Math.ceil((playerPos.z + maxRadius) / spacing) * spacing;
+
+        int xCount = ((maxX - minX) / spacing) + 1;
+        int yCount = ((maxY - minY) / spacing) + 1;
+        int zCount = ((maxZ - minZ) / spacing) + 1;
+        int[] nearestPortalIdx = new int[xCount * yCount * zCount];
+        Arrays.fill(nearestPortalIdx, -1);
+
+        // For each sample point, find the linked portal
+        for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
+            for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
+                for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
+                    if (request.id != latestRequestId) {
+                        return false;
+                    }
+                    int index = ((ix * yCount) + iy) * zCount + iz;
+                    double dx = x - playerPos.x;
+                    double dy = y - playerPos.y;
+                    double dz = z - playerPos.z;
+                    double distSq = dx * dx + dy * dy + dz * dz;
+
+                    // Use 3D distance check
+                    if (distSq < (double) minRadius * minRadius || distSq > (double) maxRadius * maxRadius) {
+                        nearestPortalIdx[index] = SKIP_INDEX;
+                        continue;
+                    }
+
+                    int nearest = findNearestPortalIndex(x, y, z, request.currentDim,
+                        request.portalCenters, portalX, portalY, portalZ, request.useLinkingAlgorithm);
+                    nearestPortalIdx[index] = nearest;
+                }
+            }
+        }
+
+        // Generate edges where portal zones change
+        List<VoronoiEdge> edges = new ArrayList<>();
+        for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
+            for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
+                for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
+                    if (request.id != latestRequestId) {
+                        return false;
+                    }
+                    int index = ((ix * yCount) + iy) * zCount + iz;
+                    int portalIndex = nearestPortalIdx[index];
+                    if (portalIndex < 0) {
+                        continue;
+                    }
+
+                    // Check neighbors in +X, +Y, +Z directions
+                    if (ix + 1 < xCount) {
+                        int neighborIdx = ((ix + 1) * yCount + iy) * zCount + iz;
+                        checkNeighborAndAddEdge(edges, nearestPortalIdx, index, neighborIdx,
+                            x, y, z, x + spacing, y, z, spacing,
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
+                    }
+                    if (iy + 1 < yCount) {
+                        int neighborIdx = (ix * yCount + (iy + 1)) * zCount + iz;
+                        checkNeighborAndAddEdge(edges, nearestPortalIdx, index, neighborIdx,
+                            x, y, z, x, y + spacing, z, spacing,
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
+                    }
+                    if (iz + 1 < zCount) {
+                        int neighborIdx = (ix * yCount + iy) * zCount + (iz + 1);
+                        checkNeighborAndAddEdge(edges, nearestPortalIdx, index, neighborIdx,
+                            x, y, z, x, y, z + spacing, spacing,
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
+                    }
+                }
+            }
+        }
+
+        edgesQueue.addAll(edges);
+        return true;
+    }
+
+    /**
+     * Check neighbor and add edge for rectangular grid.
+     */
+    private void checkNeighborAndAddEdge(List<VoronoiEdge> edges, int[] nearestPortalIdx,
+                                         int index1, int index2,
+                                         int x1, int y1, int z1, int x2, int y2, int z2, int spacing,
+                                         Vec3[] portalCenters, Vector3f[] portalColors,
+                                         boolean showNeutralBorders, boolean showVerticalBorders) {
+        int portal1 = nearestPortalIdx[index1];
+        int portal2 = nearestPortalIdx[index2];
+
+        if (portal1 == SKIP_INDEX || portal2 == SKIP_INDEX || portal1 == portal2) {
+            return;
+        }
+
+        Vec3 start = new Vec3(x1, y1, z1);
+        Vec3 end = new Vec3(x2, y2, z2);
+        Vec3 midpoint = start.add(end).scale(0.5);
+        Vec3 direction = end.subtract(start);
+
+        if (direction.lengthSqr() == 0.0) {
+            return;
+        }
+
+        // Direction from one grid point to the other (perpendicular to the border surface)
+        Vec3 borderNormal = direction.normalize();
+
+        // Calculate two perpendicular tangent vectors for true 3D border rendering
+        // This creates a small cross/patch at each border point instead of just horizontal lines
+        Vec3 tangent1, tangent2;
+
+        // Choose first tangent perpendicular to border normal
+        if (Math.abs(borderNormal.y) < 0.9) {
+            // If not nearly vertical, use the cross product with up vector
+            tangent1 = new Vec3(0, 1, 0).cross(borderNormal).normalize();
+        } else {
+            // If nearly vertical, use the cross product with right vector
+            tangent1 = new Vec3(1, 0, 0).cross(borderNormal).normalize();
+        }
+
+        // Second tangent is perpendicular to both border normal and tangent1
+        tangent2 = borderNormal.cross(tangent1).normalize();
+
+        // Scale tangents to spacing size
+        tangent1 = tangent1.scale(spacing * 0.5);
+        tangent2 = tangent2.scale(spacing * 0.5);
+
+        // Check if this is a vertical edge (for the vertical borders checkbox)
+        if (Math.abs(borderNormal.y) > 0.9 && !showVerticalBorders) {
+            return;
+        }
+
+        // Determine colors
+        Vector3f color1, color2;
+        if (portal1 == -1 || portal2 == -1) {
+            if (!showNeutralBorders) {
+                return;
+            }
+            color1 = portal1 == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal1];
+            color2 = portal2 == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal2];
+        } else {
+            color1 = portalColors[portal1];
+            color2 = portalColors[portal2];
+        }
+
+        // Create a rectangular frame pattern where lines of the same color connect at endpoints
+        // Offset each line perpendicular to its own axis, and offset along the border normal
+        Vec3 normalOffset = borderNormal.scale(BORDER_OFFSET);
+
+        // Draw lines along tangent1 (offset by ±tangent2)
+        Vec3 edge1Start = midpoint.subtract(tangent1).add(tangent2);
+        Vec3 edge1End = midpoint.add(tangent1).add(tangent2);
+        edges.add(new VoronoiEdge(edge1Start.add(normalOffset), edge1End.add(normalOffset), color1, spacing));
+        edges.add(new VoronoiEdge(edge1Start.subtract(normalOffset), edge1End.subtract(normalOffset), color2, spacing));
+
+        Vec3 edge2Start = midpoint.subtract(tangent1).subtract(tangent2);
+        Vec3 edge2End = midpoint.add(tangent1).subtract(tangent2);
+        edges.add(new VoronoiEdge(edge2Start.add(normalOffset), edge2End.add(normalOffset), color1, spacing));
+        edges.add(new VoronoiEdge(edge2Start.subtract(normalOffset), edge2End.subtract(normalOffset), color2, spacing));
+
+        // Draw lines along tangent2 (offset by ±tangent1)
+        Vec3 edge3Start = midpoint.add(tangent1).subtract(tangent2);
+        Vec3 edge3End = midpoint.add(tangent1).add(tangent2);
+        edges.add(new VoronoiEdge(edge3Start.add(normalOffset), edge3End.add(normalOffset), color1, spacing));
+        edges.add(new VoronoiEdge(edge3Start.subtract(normalOffset), edge3End.subtract(normalOffset), color2, spacing));
+
+        Vec3 edge4Start = midpoint.subtract(tangent1).subtract(tangent2);
+        Vec3 edge4End = midpoint.subtract(tangent1).add(tangent2);
+        edges.add(new VoronoiEdge(edge4Start.add(normalOffset), edge4End.add(normalOffset), color1, spacing));
+        edges.add(new VoronoiEdge(edge4Start.subtract(normalOffset), edge4End.subtract(normalOffset), color2, spacing));
+    }
+
+    /**
+     * Calculate Voronoi edges using hexagonal grid (for spacing > 1, farther from player).
+     */
+    private boolean calculateVoronoiZonesHexagonal(RecalcRequest request,
+                                                   double[] portalX, double[] portalY, double[] portalZ,
+                                                   int minRadius, int maxRadius, int hexRadius,
+                                                   ConcurrentLinkedQueue<VoronoiEdge> edgesQueue) {
+        Vec3 playerPos = request.playerPos;
+
+        // Generate hexagonal grid cells within the LOD ring
+        // We'll iterate over a bounding box and generate hex cells, then filter by distance
+        Map<HexGrid.HexCoord, Integer> hexPortalMap = new HashMap<>();
+
+        // Calculate bounds for hexagon generation
+        int minY = Math.max((int) Math.floor(playerPos.y - maxRadius), -64);
+        int maxY = Math.min((int) Math.ceil(playerPos.y + maxRadius), 320);
+
+        // Estimate hex grid bounds (conservative estimate)
+        int hexGridRadius = (int) Math.ceil(maxRadius / hexRadius) + 2;
+
+        // Center hex at player position
+        HexGrid.HexCoord centerHex = HexGrid.worldToHex(playerPos.x, playerPos.y, playerPos.z, hexRadius);
+
+        // Generate hexagons in a radius around the player
+        for (int yLevel = minY; yLevel <= maxY; yLevel += hexRadius) {
+            HexGrid.HexCoord centerAtY = new HexGrid.HexCoord(centerHex.q, centerHex.r, yLevel);
+            List<HexGrid.HexCoord> hexesAtLevel = HexGrid.getHexesInRadius(centerAtY, hexGridRadius);
+
+            for (HexGrid.HexCoord hex : hexesAtLevel) {
+                if (request.id != latestRequestId) {
+                    return false;
+                }
+
+                Vec3 hexCenter = HexGrid.hexToWorld(hex, hexRadius);
+                double dx = hexCenter.x - playerPos.x;
+                double dy = hexCenter.y - playerPos.y;
+                double dz = hexCenter.z - playerPos.z;
+                double distSq = dx * dx + dy * dy + dz * dz;
+                double dist = Math.sqrt(distSq);
+
+                // Check if within LOD ring (using 3D distance)
+                if (dist < minRadius || dist > maxRadius) {
+                    continue;
+                }
+
+                // Find nearest portal for this hex center
+                int portalIndex = findNearestPortalIndex(
+                    hexCenter.x, hexCenter.y, hexCenter.z,
+                    request.currentDim, request.portalCenters,
+                    portalX, portalY, portalZ, request.useLinkingAlgorithm);
+
+                hexPortalMap.put(hex, portalIndex);
+            }
+        }
+
+        // Generate edges where portal zones change between adjacent hexagons
+        List<VoronoiEdge> edges = new ArrayList<>();
+        for (Map.Entry<HexGrid.HexCoord, Integer> entry : hexPortalMap.entrySet()) {
+            if (request.id != latestRequestId) {
+                return false;
+            }
+
+            HexGrid.HexCoord hex = entry.getKey();
+            int portalIndex = entry.getValue();
+
+            if (portalIndex == SKIP_INDEX) {
+                continue;
+            }
+
+            // Check horizontal neighbors (6 directions)
+            HexGrid.HexCoord[] neighbors = HexGrid.getNeighbors(hex);
+            for (HexGrid.HexCoord neighbor : neighbors) {
+                Integer neighborPortal = hexPortalMap.get(neighbor);
+                if (neighborPortal != null && neighborPortal != SKIP_INDEX && portalIndex != neighborPortal) {
+                    // Draw edge between these hexagons
+                    Vec3 edgeMidpoint = HexGrid.getEdgeMidpoint(hex, neighbor, hexRadius);
+                    if (edgeMidpoint != null) {
+                        addHexEdge(edges, hex, neighbor, portalIndex, neighborPortal,
+                            edgeMidpoint, hexRadius, request.portalCenters, request.portalColors,
+                            request.showNeutralBorders);
+                    }
+                }
+            }
+
+            // Vertical borders checkbox only affects LOD 0 (rectangular grid), not hexagonal grids
+            // Hexagonal grids don't render vertical neighbors to maintain performance at higher LODs
+        }
+
+        edgesQueue.addAll(edges);
+        return true;
+    }
+
+    /**
+     * Add edge lines between two adjacent hexagons with different portal zones.
+     */
+    private void addHexEdge(List<VoronoiEdge> edges, HexGrid.HexCoord hex1, HexGrid.HexCoord hex2,
+                            int portal1Index, int portal2Index, Vec3 edgeMidpoint, double hexRadius,
+                            Vec3[] portalCenters, Vector3f[] portalColors, boolean showNeutralBorders) {
+        // Calculate direction between hex centers (perpendicular to the border surface)
+        Vec3 center1 = HexGrid.hexToWorld(hex1, hexRadius);
+        Vec3 center2 = HexGrid.hexToWorld(hex2, hexRadius);
+        Vec3 direction = center2.subtract(center1);
+
+        if (direction.lengthSqr() == 0.0) {
+            return;
+        }
+
+        Vec3 borderNormal = direction.normalize();
+
+        // Calculate two perpendicular tangent vectors for true 3D border rendering
+        Vec3 tangent1, tangent2;
+
+        // Choose first tangent perpendicular to border normal
+        if (Math.abs(borderNormal.y) < 0.9) {
+            tangent1 = new Vec3(0, 1, 0).cross(borderNormal).normalize();
+        } else {
+            tangent1 = new Vec3(1, 0, 0).cross(borderNormal).normalize();
+        }
+
+        // Second tangent is perpendicular to both border normal and tangent1
+        tangent2 = borderNormal.cross(tangent1).normalize();
+
+        // Scale tangents
+        tangent1 = tangent1.scale(hexRadius * 0.45);
+        tangent2 = tangent2.scale(hexRadius * 0.45);
+
+        // Determine colors
+        Vector3f color1, color2;
+        if (portal1Index == -1 || portal2Index == -1) {
+            if (!showNeutralBorders) {
+                return;
+            }
+            color1 = portal1Index == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal1Index];
+            color2 = portal2Index == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal2Index];
+        } else {
+            color1 = portalColors[portal1Index];
+            color2 = portalColors[portal2Index];
+        }
+
+        // Create a rectangular frame pattern where lines of the same color connect at endpoints
+        // Offset each line perpendicular to its own axis, and offset along the border normal
+        Vec3 normalOffset = borderNormal.scale(BORDER_OFFSET);
+
+        // Draw lines along tangent1 (offset by ±tangent2)
+        Vec3 edge1Start = edgeMidpoint.subtract(tangent1).add(tangent2);
+        Vec3 edge1End = edgeMidpoint.add(tangent1).add(tangent2);
+        edges.add(new VoronoiEdge(edge1Start.add(normalOffset), edge1End.add(normalOffset), color1, (int) hexRadius));
+        edges.add(new VoronoiEdge(edge1Start.subtract(normalOffset), edge1End.subtract(normalOffset), color2, (int) hexRadius));
+
+        Vec3 edge2Start = edgeMidpoint.subtract(tangent1).subtract(tangent2);
+        Vec3 edge2End = edgeMidpoint.add(tangent1).subtract(tangent2);
+        edges.add(new VoronoiEdge(edge2Start.add(normalOffset), edge2End.add(normalOffset), color1, (int) hexRadius));
+        edges.add(new VoronoiEdge(edge2Start.subtract(normalOffset), edge2End.subtract(normalOffset), color2, (int) hexRadius));
+
+        // Draw lines along tangent2 (offset by ±tangent1)
+        Vec3 edge3Start = edgeMidpoint.add(tangent1).subtract(tangent2);
+        Vec3 edge3End = edgeMidpoint.add(tangent1).add(tangent2);
+        edges.add(new VoronoiEdge(edge3Start.add(normalOffset), edge3End.add(normalOffset), color1, (int) hexRadius));
+        edges.add(new VoronoiEdge(edge3Start.subtract(normalOffset), edge3End.subtract(normalOffset), color2, (int) hexRadius));
+
+        Vec3 edge4Start = edgeMidpoint.subtract(tangent1).subtract(tangent2);
+        Vec3 edge4End = edgeMidpoint.subtract(tangent1).add(tangent2);
+        edges.add(new VoronoiEdge(edge4Start.add(normalOffset), edge4End.add(normalOffset), color1, (int) hexRadius));
+        edges.add(new VoronoiEdge(edge4Start.subtract(normalOffset), edge4End.subtract(normalOffset), color2, (int) hexRadius));
+    }
+
+    /**
+     * Add vertical edge between hexagons at different Y levels.
+     */
+    private void addVerticalHexEdge(List<VoronoiEdge> edges, int portal1Index, int portal2Index,
+                                    Vec3 edgeMidpoint, double hexRadius,
+                                    Vec3[] portalCenters, Vector3f[] portalColors, boolean showNeutralBorders) {
+        // For vertical edges, create a small horizontal line
+        Vec3 tangent = new Vec3(hexRadius * 0.5, 0, 0);
+        Vec3 start = edgeMidpoint.subtract(tangent);
+        Vec3 end = edgeMidpoint.add(tangent);
+
+        // Handle neutral zones
+        if (portal1Index == -1 || portal2Index == -1) {
+            if (!showNeutralBorders) {
+                return;
+            }
+            Vector3f color = portal1Index == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal1Index];
+            if (portal2Index != -1) {
+                color = portalColors[portal2Index];
+            }
+            edges.add(new VoronoiEdge(start, end, color, (int) hexRadius));
+            return;
+        }
+
+        // Add colored edges
+        Vector3f color1 = portalColors[portal1Index];
+        Vector3f color2 = portalColors[portal2Index];
+
+        Vec3 offset = new Vec3(0, BORDER_OFFSET, 0);
+        edges.add(new VoronoiEdge(start.subtract(offset), end.subtract(offset), color1, (int) hexRadius));
+        edges.add(new VoronoiEdge(start.add(offset), end.add(offset), color2, (int) hexRadius));
+    }
+
+    private static boolean shouldRenderEdge(VoronoiEdge edge, Vec3 camPos, float fuzzThreshold, int fuzzStartDistance) {
+        // LOD 0 (spacing == 1) always renders every line with 0% drop
+        if (edge.alwaysRender) {
+            return true;
+        }
+
+        // Check border draw distance
+        double maxBorderDistance = PortalManager.getInstance().getBorderDrawDistance();
+        double midX = (edge.start.x + edge.end.x) * 0.5;
+        double midY = (edge.start.y + edge.end.y) * 0.5;
+        double midZ = (edge.start.z + edge.end.z) * 0.5;
+        double dx = midX - camPos.x;
+        double dy = midY - camPos.y;
+        double dz = midZ - camPos.z;
+        double distSq = dx * dx + dy * dy + dz * dz;
+
+        // Don't render if beyond border draw distance
+        if (distSq > maxBorderDistance * maxBorderDistance) {
+            return false;
+        }
+
+        // If threshold is 0, always render all lines
+        if (fuzzThreshold <= 0.0f) {
+            return true;
+        }
+
+        // Calculate actual distance from camera
+        double distance = Math.sqrt(distSq);
+        double lod0Radius = Math.max(0.0, fuzzStartDistance);
+
+        // Within LOD 0 radius, always render (0% drop)
+        if (distance <= lod0Radius) {
+            return true;
+        }
+
+        // Beyond LOD 0, drop chance increases linearly with distance from LOD 0 boundary
+        // Fade range extends from LOD 0 boundary to max border distance
+        double distanceBeyondLod0 = distance - lod0Radius;
+        double fadeRange = maxBorderDistance - lod0Radius;
+
+        if (fadeRange <= 0.0) {
+            fadeRange = 1.0; // Avoid division by zero
+        }
+
+        // Calculate interpolation factor (0 at LOD 0 boundary, 1 at max distance)
+        double t = distanceBeyondLod0 / fadeRange;
+        if (t < 0.0) {
+            t = 0.0;
+        }
+        if (t > 1.0) {
+            t = 1.0;
+        }
+
+        // Drop chance starts at 0% at LOD 0 boundary, increases to fuzzThreshold% at max distance
+        // The threshold slider controls the maximum drop percentage
+        float dropChance = (float) (t * fuzzThreshold);
+        return fastRandom(edge) >= dropChance;
+    }
+
+    private static float fastRandom(VoronoiEdge edge) {
+        return (edge.hash & 0x7fffffff) / 2147483647.0f;
+    }
+
+    private static int hashEdge(Vec3 start, Vec3 end) {
+        int h = 0x811c9dc5;
+        h = (h ^ quantize(start.x)) * 0x01000193;
+        h = (h ^ quantize(start.y)) * 0x01000193;
+        h = (h ^ quantize(start.z)) * 0x01000193;
+        h = (h ^ quantize(end.x)) * 0x01000193;
+        h = (h ^ quantize(end.y)) * 0x01000193;
+        h = (h ^ quantize(end.z)) * 0x01000193;
+        return h;
+    }
+
+    private static int quantize(double value) {
+        return (int) Math.round(value * 16.0);
+    }
+
+    private boolean shouldQueueRecalc(Vec3 camPos, ResourceKey<Level> currentDim) {
+        if (lastRequestedDimension == null || !currentDim.equals(lastRequestedDimension)) {
+            return true;
+        }
+        if (lastRequestedPlayerPos == null) {
+            return true;
+        }
+        return camPos.distanceTo(lastRequestedPlayerPos) > RECALC_DISTANCE_THRESHOLD
+            || PortalManager.getInstance().hasPortalsChanged();
+    }
+
+    private void queueRecalc(RecalcRequest request) {
+        synchronized (recalcLock) {
+            latestRequestId = request.id;
+            pendingRequest = request;
+            recalcLock.notify();
+        }
+    }
+
+    private RecalcRequest buildRecalcRequest(Vec3 playerPos, ResourceKey<Level> currentDim) {
+        // Get portals from the OTHER dimension (the ones we would link to)
+        ResourceKey<Level> otherDim = Level.NETHER.equals(currentDim) ? Level.OVERWORLD : Level.NETHER;
+        Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
+        if (otherDimPortals.size() < 2) {
+            return null;
+        }
+
+        boolean showNeutralBorders = PortalManager.getInstance().isNeutralBordersEnabled();
+        boolean showVerticalBorders = PortalManager.getInstance().isVerticalBordersEnabled();
+        boolean useLinkingAlgorithm = true;
+
+        int count = otherDimPortals.size();
+        Vec3[] centers = new Vec3[count];
+        Vec3[] translated = new Vec3[count];
+        Vector3f[] colors = new Vector3f[count];
+        int i = 0;
+        for (PortalInfo portal : otherDimPortals) {
+            // Use translated positions - these are in the current dimension's coordinate space
+            centers[i] = portal.getTranslatedPos();
+            translated[i] = portal.getTranslatedPos();
+            Vector3f color = PortalManager.getInstance().getPortalColor(portal);
+            colors[i] = new Vector3f(color);
+            i++;
+        }
+
+        long id = requestId.incrementAndGet();
+        return new RecalcRequest(id, playerPos, currentDim, centers, translated, colors,
+            showNeutralBorders, showVerticalBorders, useLinkingAlgorithm);
+    }
+
+    private void recalcLoop() {
+        while (true) {
+            RecalcRequest request;
+            synchronized (recalcLock) {
+                while (pendingRequest == null) {
+                    try {
+                        recalcLock.wait();
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+                request = pendingRequest;
+                pendingRequest = null;
+            }
+
+            ConcurrentLinkedQueue<VoronoiEdge> edgesQueue = new ConcurrentLinkedQueue<>();
+            cachedEdges.set(edgesQueue);
+            cachedDimension = request.currentDim;
+            cachedPlayerPos = request.playerPos;
+            if (!recalculateVoronoi(request, edgesQueue)) {
+                continue;
+            }
+            cachedDimension = request.currentDim;
+            cachedPlayerPos = request.playerPos;
+        }
+    }
+
+    private static class RecalcRequest {
+        final long id;
+        final Vec3 playerPos;
+        final ResourceKey<Level> currentDim;
+        final Vec3[] portalCenters;
+        final Vec3[] portalTranslated;
+        final Vector3f[] portalColors;
+        final boolean showNeutralBorders;
+        final boolean showVerticalBorders;
+        final boolean useLinkingAlgorithm;
+
+        RecalcRequest(long id, Vec3 playerPos, ResourceKey<Level> currentDim,
+                      Vec3[] portalCenters, Vec3[] portalTranslated, Vector3f[] portalColors,
+                      boolean showNeutralBorders, boolean showVerticalBorders, boolean useLinkingAlgorithm) {
+            this.id = id;
+            this.playerPos = playerPos;
+            this.currentDim = currentDim;
+            this.portalCenters = portalCenters;
+            this.portalTranslated = portalTranslated;
+            this.portalColors = portalColors;
+            this.showNeutralBorders = showNeutralBorders;
+            this.showVerticalBorders = showVerticalBorders;
+            this.useLinkingAlgorithm = useLinkingAlgorithm;
         }
     }
 }

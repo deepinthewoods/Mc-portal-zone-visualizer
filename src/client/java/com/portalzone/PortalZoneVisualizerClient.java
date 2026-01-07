@@ -53,7 +53,9 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
 
             // Handle portal management keybinding
             while (portalManagementKey.consumeClick()) {
-                if (client.screen == null) {
+                if (client.screen instanceof PortalManagementScreen) {
+                    client.setScreen(null);
+                } else if (client.screen == null) {
                     client.setScreen(new PortalManagementScreen(null));
                 }
             }

@@ -30,10 +30,12 @@ import java.util.Set;
  */
 public class PortalRenderer {
     private static final int FULLBRIGHT = 0x00F000F0;
-    private static final float MARKER_SIZE = 3.0f; // 3 blocks in-game size
-    private static final int MIN_PIXEL_SIZE = 20; // Minimum 20 pixels on screen
-    private static final int MAX_RENDER_DISTANCE = 256; // Max render distance in blocks
-    private static final RenderType LINES_NO_DEPTH = createNoDepthLines();
+    private static final float BORDER_LINE_WIDTH = 3.0f;
+    private static final float MARKER_LINE_WIDTH = 8.0f;
+    private static final RenderType LINES_DEPTH = createLines(true, BORDER_LINE_WIDTH, "portal_zone_lines");
+    private static final RenderType LINES_NO_DEPTH = createLines(false, BORDER_LINE_WIDTH, "portal_zone_lines_no_depth");
+    private static final RenderType MARKER_LINES_DEPTH = createLines(true, MARKER_LINE_WIDTH, "portal_zone_marker_lines");
+    private static final RenderType MARKER_LINES_NO_DEPTH = createLines(false, MARKER_LINE_WIDTH, "portal_zone_marker_lines_no_depth");
 
     public static void render(PoseStack matrices, Camera camera, MultiBufferSource bufferSource) {
         // Check if rendering is enabled
@@ -50,45 +52,52 @@ public class PortalRenderer {
         Vec3 camPos = camera.getPosition();
         ResourceKey<Level> currentDim = mc.level.dimension();
 
-        // Render portal markers with depth control
+        // Render Voronoi borders first (with depth control)
+        VoronoiCalculator.getInstance().render(matrices, bufferSource, camPos, currentDim, camera);
+
+        // Render portal markers with depth control (after borders so they're on top)
         boolean portalMarkersAlwaysVisible = PortalManager.getInstance().isPortalMarkersAlwaysVisible();
         boolean portalMarkersUseDepth = !portalMarkersAlwaysVisible;
 
-        // Render portals in current dimension (as circles)
+        // Render portals in current dimension
         Set<PortalInfo> currentDimPortals = PortalManager.getInstance().getPortalsInDimension(currentDim);
         for (PortalInfo portal : currentDimPortals) {
-            double distance = portal.getCenterPos().distanceTo(camPos);
-            if (distance > MAX_RENDER_DISTANCE) continue;
-
-            renderPortalCircle(matrices, bufferSource, camPos, portal, camera, portalMarkersUseDepth);
+            renderPortalMarker(matrices, bufferSource, camPos, portal, portal.getCenterPos(), currentDim,
+                camera, portalMarkersUseDepth);
         }
 
-        // Render portals in other dimension (as X marks with translated coordinates)
+        // Render portals in other dimension (with translated coordinates)
         ResourceKey<Level> otherDim = currentDim == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
         Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
 
         for (PortalInfo portal : otherDimPortals) {
             Vec3 translatedPos = portal.getTranslatedPos();
-            double distance = translatedPos.distanceTo(camPos);
-            if (distance > MAX_RENDER_DISTANCE) continue;
-
-            renderPortalX(matrices, bufferSource, camPos, portal, translatedPos, camera, portalMarkersUseDepth);
+            renderPortalMarker(matrices, bufferSource, camPos, portal, translatedPos, currentDim,
+                camera, portalMarkersUseDepth);
         }
-
-        // Render Voronoi borders (with depth control)
-        VoronoiCalculator.getInstance().render(matrices, bufferSource, camPos, currentDim, camera);
     }
 
     /**
      * Render a portal as a billboard circle in its actual dimension
      */
-    private static void renderPortalCircle(PoseStack matrices, MultiBufferSource bufferSource,
-                                           Vec3 camPos, PortalInfo portal, Camera camera, boolean useDepthTest) {
-        Vec3 worldPos = portal.getCenterPos();
+    private static void renderPortalMarker(PoseStack matrices, MultiBufferSource bufferSource,
+                                           Vec3 camPos, PortalInfo portal, Vec3 worldPos, ResourceKey<Level> currentDim,
+                                           Camera camera, boolean useDepthTest) {
         double distance = worldPos.distanceTo(camPos);
 
-        // Calculate size with minimum pixel size
-        float size = calculateBillboardSize(distance, MARKER_SIZE);
+        // Check draw distance
+        PortalManager manager = PortalManager.getInstance();
+        if (!manager.isPortalMarkerDrawDistanceInfinite()) {
+            double maxDistance = manager.getPortalMarkerDrawDistance();
+            if (distance > maxDistance) {
+                return; // Don't render if beyond draw distance
+            }
+        }
+
+        // Calculate size with minimum screen percentage
+        float halfWidth = portal.width * 0.5f;
+        float halfHeight = portal.height * 0.5f;
+        Vec2 markerHalfSize = ensureMinimumScreenSize(distance, halfWidth, halfHeight);
 
         // Get color
         Vector3f color = PortalManager.getInstance().getPortalColor(portal);
@@ -96,65 +105,62 @@ public class PortalRenderer {
         // Use world position directly (PoseStack is already camera-relative)
         Vec3 pos = worldPos;
 
-        // Draw circle as billboard
-        drawBillboardCircle(matrices, bufferSource, pos, size, color.x, color.y, color.z, 0.8f, camera, useDepthTest);
+        // Draw marker shape based on portal dimension
+        if (Level.OVERWORLD.equals(portal.dimension)) {
+            drawBillboardEllipse(matrices, bufferSource, pos, markerHalfSize.x, markerHalfSize.y,
+                color.x, color.y, color.z, 0.8f, camera, useDepthTest);
+        } else {
+            boolean useProperNDiagonal = Level.NETHER.equals(currentDim);
+            drawBillboardN(matrices, bufferSource, pos, markerHalfSize.x, markerHalfSize.y,
+                color.x, color.y, color.z, 0.8f, camera, useDepthTest, useProperNDiagonal);
+        }
 
-        // Draw label below the circle
-        Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
+        // Draw label below the marker
+        float labelOffsetY = markerHalfSize.y * 1.5f;
+        Vec3 labelOffset = new Vec3(0, -labelOffsetY, 0);
         String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
         renderLabel(matrices, bufferSource, pos.add(labelOffset), displayName, color, distance, camera);
     }
 
     /**
-     * Render a portal as a billboard X mark with translated coordinates
+     * Ensure marker size meets minimum screen percentage on its long side.
      */
-    private static void renderPortalX(PoseStack matrices, MultiBufferSource bufferSource,
-                                      Vec3 camPos, PortalInfo portal, Vec3 translatedPos, Camera camera, boolean useDepthTest) {
-        double distance = translatedPos.distanceTo(camPos);
-
-        // Calculate size with minimum pixel size
-        float size = calculateBillboardSize(distance, MARKER_SIZE);
-
-        // Get color
-        Vector3f color = PortalManager.getInstance().getPortalColor(portal);
-
-        // Use world position directly (PoseStack is already camera-relative)
-        Vec3 pos = translatedPos;
-
-        // Draw X mark as billboard
-        drawBillboardX(matrices, bufferSource, pos, size, color.x, color.y, color.z, 0.8f, camera, useDepthTest);
-
-        // Draw label below the X
-        Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
-        String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
-        renderLabel(matrices, bufferSource, pos.add(labelOffset), displayName, color, distance, camera);
-    }
-
-    /**
-     * Calculate billboard size with minimum pixel constraint
-     */
-    private static float calculateBillboardSize(double distance, float baseSize) {
-        // Calculate what size would give us MIN_PIXEL_SIZE pixels at this distance
-        // Approximate FOV and screen scaling
+    private static Vec2 ensureMinimumScreenSize(double distance, float halfWidth, float halfHeight) {
         Minecraft mc = Minecraft.getInstance();
         int screenHeight = mc.getWindow().getHeight();
+        int screenWidth = mc.getWindow().getWidth();
+        int longSide = Math.max(screenWidth, screenHeight);
         double fov = mc.options.fov().get();
 
-        // Pixels per block at distance
+        if (distance <= 0.0) {
+            return new Vec2(halfWidth, halfHeight);
+        }
+
+        // Pixels per block at distance (vertical FOV approximation)
         double pixelsPerBlock = screenHeight / (2.0 * distance * Math.tan(Math.toRadians(fov / 2.0)));
 
-        // Required size in blocks to achieve MIN_PIXEL_SIZE
-        float minSize = (float) (MIN_PIXEL_SIZE / pixelsPerBlock);
+        float widthPixels = (float) ((halfWidth * 2.0f) * pixelsPerBlock);
+        float heightPixels = (float) ((halfHeight * 2.0f) * pixelsPerBlock);
+        float longSidePixels = Math.max(widthPixels, heightPixels);
 
-        return Math.max(baseSize, minSize);
+        float minPercent = PortalManager.getInstance().getMinimumMarkerScreenPercent();
+        float minPixels = (float) (longSide * (minPercent / 100.0f));
+
+        if (minPixels <= 0.0f || longSidePixels >= minPixels) {
+            return new Vec2(halfWidth, halfHeight);
+        }
+
+        float scale = minPixels / longSidePixels;
+        return new Vec2(halfWidth * scale, halfHeight * scale);
     }
 
     /**
-     * Draw a billboard circle facing the camera
+     * Draw a billboard ellipse facing the camera
      */
-    private static void drawBillboardCircle(PoseStack matrices, MultiBufferSource bufferSource,
-                                            Vec3 center, float size, float r, float g, float b, float a, Camera camera,
-                                            boolean useDepthTest) {
+    private static void drawBillboardEllipse(PoseStack matrices, MultiBufferSource bufferSource,
+                                             Vec3 center, float halfWidth, float halfHeight,
+                                             float r, float g, float b, float a, Camera camera,
+                                             boolean useDepthTest) {
         var rot = camera.rotation();
 
         // Camera rotation already faces the camera; use it directly for billboard axes
@@ -163,8 +169,8 @@ public class PortalRenderer {
         // Calculate camera-facing right and up vectors
         Vector3f rv = new Vector3f(1, 0, 0).rotate(cameraRot);
         Vector3f uv = new Vector3f(0, 1, 0).rotate(cameraRot);
-        Vec3 right = new Vec3(rv.x, rv.y, rv.z).scale(size);
-        Vec3 up = new Vec3(uv.x, uv.y, uv.z).scale(size);
+        Vec3 right = new Vec3(rv.x, rv.y, rv.z).scale(halfWidth);
+        Vec3 up = new Vec3(uv.x, uv.y, uv.z).scale(halfHeight);
 
         // Calculate normal from camera forward vector (pointing toward camera)
         Vector3f forward = new Vector3f(0f, 0f, 1f).rotate(cameraRot);
@@ -185,7 +191,7 @@ public class PortalRenderer {
             );
 
             if (prevPoint != null) {
-                submitLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+                submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
                     prevPoint.x, prevPoint.y, prevPoint.z,
                     point.x, point.y, point.z, forward, useDepthTest);
             }
@@ -195,11 +201,11 @@ public class PortalRenderer {
     }
 
     /**
-     * Draw a billboard X mark facing the camera
+     * Draw a billboard N mark facing the camera
      */
-    private static void drawBillboardX(PoseStack matrices, MultiBufferSource bufferSource,
-                                       Vec3 center, float size, float r, float g, float b, float a, Camera camera,
-                                       boolean useDepthTest) {
+    private static void drawBillboardN(PoseStack matrices, MultiBufferSource bufferSource,
+                                       Vec3 center, float halfWidth, float halfHeight, float r, float g, float b,
+                                       float a, Camera camera, boolean useDepthTest, boolean useProperDiagonal) {
         var rot = camera.rotation();
 
         // Camera rotation already faces the camera; use it directly for billboard axes
@@ -208,8 +214,8 @@ public class PortalRenderer {
         // Calculate camera-facing right and up vectors
         Vector3f rv = new Vector3f(1, 0, 0).rotate(cameraRot);
         Vector3f uv = new Vector3f(0, 1, 0).rotate(cameraRot);
-        Vec3 right = new Vec3(rv.x, rv.y, rv.z).scale(size);
-        Vec3 up = new Vec3(uv.x, uv.y, uv.z).scale(size);
+        Vec3 right = new Vec3(rv.x, rv.y, rv.z).scale(halfWidth);
+        Vec3 up = new Vec3(uv.x, uv.y, uv.z).scale(halfHeight);
 
         // Calculate normal from camera forward vector (pointing toward camera)
         Vector3f forward = new Vector3f(0f, 0f, 1f).rotate(cameraRot);
@@ -220,14 +226,24 @@ public class PortalRenderer {
         Vec3 bottomRight = center.add(right.x - up.x, right.y - up.y, right.z - up.z);
         Vec3 bottomLeft = center.add(-right.x - up.x, -right.y - up.y, -right.z - up.z);
 
-        // Draw X (two diagonals)
-        submitLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+        // Draw N (two verticals and a diagonal)
+        submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
             topLeft.x, topLeft.y, topLeft.z,
+            bottomLeft.x, bottomLeft.y, bottomLeft.z, forward, useDepthTest);
+
+        submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+            topRight.x, topRight.y, topRight.z,
             bottomRight.x, bottomRight.y, bottomRight.z, forward, useDepthTest);
 
-        submitLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
-            topRight.x, topRight.y, topRight.z,
-            bottomLeft.x, bottomLeft.y, bottomLeft.z, forward, useDepthTest);
+        if (useProperDiagonal) {
+            submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+                topLeft.x, topLeft.y, topLeft.z,
+                bottomRight.x, bottomRight.y, bottomRight.z, forward, useDepthTest);
+        } else {
+            submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+                bottomLeft.x, bottomLeft.y, bottomLeft.z,
+                topRight.x, topRight.y, topRight.z, forward, useDepthTest);
+        }
     }
 
     /**
@@ -237,18 +253,44 @@ public class PortalRenderer {
                                    float r, float g, float b, float a, int light,
                                    double ax, double ay, double az, double bx, double by, double bz,
                                    Vector3f normal, boolean useDepthTest) {
-        RenderType renderType = useDepthTest ? RenderType.lines() : LINES_NO_DEPTH;
+        RenderType renderType = useDepthTest ? LINES_DEPTH : LINES_NO_DEPTH;
         VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
         Matrix4f pose = matrices.last().pose();
 
         // First vertex
         vertexConsumer.addVertex(pose, (float)ax, (float)ay, (float)az)
                 .setColor(r, g, b, a)
+                .setLight(light)
                 .setNormal(matrices.last(), normal.x, normal.y, normal.z);
 
         // Second vertex
         vertexConsumer.addVertex(pose, (float)bx, (float)by, (float)bz)
                 .setColor(r, g, b, a)
+                .setLight(light)
+                .setNormal(matrices.last(), normal.x, normal.y, normal.z);
+    }
+
+    /**
+     * Submit a marker line to the render queue
+     */
+    private static void submitMarkerLine(PoseStack matrices, MultiBufferSource bufferSource,
+                                   float r, float g, float b, float a, int light,
+                                   double ax, double ay, double az, double bx, double by, double bz,
+                                   Vector3f normal, boolean useDepthTest) {
+        RenderType renderType = useDepthTest ? MARKER_LINES_DEPTH : MARKER_LINES_NO_DEPTH;
+        VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
+        Matrix4f pose = matrices.last().pose();
+
+        // First vertex
+        vertexConsumer.addVertex(pose, (float)ax, (float)ay, (float)az)
+                .setColor(r, g, b, a)
+                .setLight(light)
+                .setNormal(matrices.last(), normal.x, normal.y, normal.z);
+
+        // Second vertex
+        vertexConsumer.addVertex(pose, (float)bx, (float)by, (float)bz)
+                .setColor(r, g, b, a)
+                .setLight(light)
                 .setNormal(matrices.last(), normal.x, normal.y, normal.z);
     }
 
@@ -289,23 +331,31 @@ public class PortalRenderer {
         matrices.popPose();
     }
 
-    private static RenderType createNoDepthLines() {
-        RenderPipeline pipeline = RenderPipeline.builder(RenderPipelines.LINES_SNIPPET)
-            .withLocation("pipeline/portal_zone_lines_no_depth")
-            .withDepthTestFunction(DepthTestFunction.NO_DEPTH_TEST)
-            .withDepthWrite(false)
-            .build();
+    private static RenderType createLines(boolean useDepthTest, float lineWidth, String name) {
+        RenderPipeline.Builder pipelineBuilder = RenderPipeline.builder(RenderPipelines.LINES_SNIPPET)
+            .withLocation(useDepthTest
+                ? "pipeline/" + name
+                : "pipeline/" + name);
+
+        if (!useDepthTest) {
+            pipelineBuilder.withDepthTestFunction(DepthTestFunction.NO_DEPTH_TEST)
+                .withDepthWrite(false);
+        }
+
+        RenderPipeline pipeline = pipelineBuilder.build();
 
         RenderType.CompositeState.CompositeStateBuilder builder = RenderType.CompositeState.builder()
-            .setLineState(new RenderStateShard.LineStateShard(OptionalDouble.empty()))
+            .setLineState(new RenderStateShard.LineStateShard(OptionalDouble.of((double) lineWidth)))
             .setLayeringState(RenderStateShard.VIEW_OFFSET_Z_LAYERING)
             .setOutputState(RenderStateShard.ITEM_ENTITY_TARGET);
 
         return RenderType.create(
-            "portal_zone_lines_no_depth",
+            name,
             1536,
             RenderPipelines.register(pipeline),
             builder.createCompositeState(false)
         );
     }
+
+    private record Vec2(float x, float y) {}
 }

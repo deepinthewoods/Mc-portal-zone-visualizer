@@ -46,7 +46,7 @@ public class PortalLinkingAlgorithm {
         Vec3 translatedPos = translateCoordinates(sourcePos, sourceDim);
 
         // Determine the destination dimension
-        ResourceKey<Level> destDim = (sourceDim == Level.NETHER) ? Level.OVERWORLD : Level.NETHER;
+        ResourceKey<Level> destDim = Level.NETHER.equals(sourceDim) ? Level.OVERWORLD : Level.NETHER;
 
         // Get the search radius for the destination dimension
         int searchRadius = getSearchRadius(destDim);
@@ -56,13 +56,15 @@ public class PortalLinkingAlgorithm {
         double nearestDistance = Double.MAX_VALUE;
 
         for (PortalInfo portal : destinationPortals) {
-            // Calculate horizontal distance (Y coordinate is less important for portal linking)
-            double distance = horizontalDistance(translatedPos, portal.getCenterPos());
+            double horizontal = horizontalDistance(translatedPos, portal.getCenterPos());
 
             // Check if portal is within search radius and closer than current nearest
-            if (distance <= searchRadius && distance < nearestDistance) {
-                nearestDistance = distance;
-                nearestPortal = portal;
+            if (horizontal <= searchRadius) {
+                double distance = distance3d(translatedPos, portal.getCenterPos());
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestPortal = portal;
+                }
             }
         }
 
@@ -77,7 +79,7 @@ public class PortalLinkingAlgorithm {
      * @return 128 for Nether, 16 for Overworld
      */
     public static int getSearchRadius(ResourceKey<Level> dimension) {
-        return (dimension == Level.NETHER) ? SEARCH_RADIUS_NETHER : SEARCH_RADIUS_OVERWORLD;
+        return Level.NETHER.equals(dimension) ? SEARCH_RADIUS_NETHER : SEARCH_RADIUS_OVERWORLD;
     }
 
     /**
@@ -89,7 +91,7 @@ public class PortalLinkingAlgorithm {
      * @return The translated position in the destination dimension
      */
     public static Vec3 translateCoordinates(Vec3 pos, ResourceKey<Level> fromDim) {
-        boolean isFromNether = (fromDim == Level.NETHER);
+        boolean isFromNether = Level.NETHER.equals(fromDim);
 
         // Nether to Overworld: multiply by 8
         // Overworld to Nether: divide by 8
@@ -103,8 +105,8 @@ public class PortalLinkingAlgorithm {
     }
 
     /**
-     * Calculate the horizontal distance between two positions, ignoring Y coordinate.
-     * Portal linking primarily considers horizontal distance since portals can be at different heights.
+     * Calculate the horizontal distance between two positions, ignoring Y.
+     * Vanilla portal search radius is horizontal only.
      *
      * @param a First position
      * @param b Second position
@@ -114,5 +116,20 @@ public class PortalLinkingAlgorithm {
         double dx = a.x - b.x;
         double dz = a.z - b.z;
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    /**
+     * Calculate the 3D distance between two positions, including Y.
+     * Vanilla portal selection uses straight-line distance, counting Y difference.
+     *
+     * @param a First position
+     * @param b Second position
+     * @return The 3D distance between the two positions
+     */
+    public static double distance3d(Vec3 a, Vec3 b) {
+        double dx = a.x - b.x;
+        double dy = a.y - b.y;
+        double dz = a.z - b.z;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 }
