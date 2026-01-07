@@ -30,6 +30,8 @@ public class VoronoiCalculator {
     // Cached Voronoi edges
     private final List<VoronoiEdge> cachedEdges = new ArrayList<>();
     private ResourceKey<Level> cachedDimension = null;
+    private Vec3 cachedPlayerPos = null;
+    private static final double RECALC_DISTANCE_THRESHOLD = 32.0; // Recalculate if player moves 32 blocks
 
     private VoronoiCalculator() {
     }
@@ -42,11 +44,17 @@ public class VoronoiCalculator {
      * Render the Voronoi borders
      */
     public void render(PoseStack matrices, MultiBufferSource bufferSource, Vec3 camPos, ResourceKey<Level> currentDim, Camera camera) {
-        // Recalculate if portals have changed or dimension changed
-        if (PortalManager.getInstance().hasPortalsChanged() || !currentDim.equals(cachedDimension)) {
+        // Recalculate if portals have changed, dimension changed, or player moved significantly
+        boolean needsRecalc = PortalManager.getInstance().hasPortalsChanged()
+                           || !currentDim.equals(cachedDimension)
+                           || cachedPlayerPos == null
+                           || camPos.distanceTo(cachedPlayerPos) > RECALC_DISTANCE_THRESHOLD;
+
+        if (needsRecalc) {
             recalculateVoronoi(camPos, currentDim);
             PortalManager.getInstance().clearChangedFlag();
             cachedDimension = currentDim;
+            cachedPlayerPos = camPos;
         }
 
         // Calculate normal from camera forward vector (pointing toward camera)
@@ -111,12 +119,13 @@ public class VoronoiCalculator {
         }
 
         // Sample points in 3D space around the player
-        int minX = ((int) playerPos.x - LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
-        int maxX = ((int) playerPos.x + LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
-        int minY = Math.max(((int) playerPos.y - LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING, -64);
-        int maxY = Math.min(((int) playerPos.y + LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING, 320);
-        int minZ = ((int) playerPos.z - LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
-        int maxZ = ((int) playerPos.z + LOCAL_RADIUS) / SAMPLE_SPACING * SAMPLE_SPACING;
+        // Align to world grid to prevent borders from shifting as player moves
+        int minX = (int) Math.floor((playerPos.x - LOCAL_RADIUS) / SAMPLE_SPACING) * SAMPLE_SPACING;
+        int maxX = (int) Math.ceil((playerPos.x + LOCAL_RADIUS) / SAMPLE_SPACING) * SAMPLE_SPACING;
+        int minY = Math.max((int) Math.floor((playerPos.y - LOCAL_RADIUS) / SAMPLE_SPACING) * SAMPLE_SPACING, -64);
+        int maxY = Math.min((int) Math.ceil((playerPos.y + LOCAL_RADIUS) / SAMPLE_SPACING) * SAMPLE_SPACING, 320);
+        int minZ = (int) Math.floor((playerPos.z - LOCAL_RADIUS) / SAMPLE_SPACING) * SAMPLE_SPACING;
+        int maxZ = (int) Math.ceil((playerPos.z + LOCAL_RADIUS) / SAMPLE_SPACING) * SAMPLE_SPACING;
 
         int xCount = ((maxX - minX) / SAMPLE_SPACING) + 1;
         int yCount = ((maxY - minY) / SAMPLE_SPACING) + 1;
@@ -221,6 +230,7 @@ public class VoronoiCalculator {
     public void clear() {
         cachedEdges.clear();
         cachedDimension = null;
+        cachedPlayerPos = null;
     }
 
     /**
