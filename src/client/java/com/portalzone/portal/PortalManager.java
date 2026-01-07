@@ -10,6 +10,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
@@ -37,6 +38,9 @@ public class PortalManager {
 
     // Store portals by dimension
     private final Map<ResourceKey<Level>, Set<PortalInfo>> portalsByDimension = new ConcurrentHashMap<>();
+
+    // Store persisted portals (loaded from config and saved across sessions)
+    private final Map<ResourceKey<Level>, Map<UUID, PortalInfo>> persistedPortals = new ConcurrentHashMap<>();
 
     // Track which chunks have been scanned
     private final Map<ResourceKey<Level>, Map<ChunkPos, Long>> scannedChunks = new ConcurrentHashMap<>();
@@ -167,6 +171,84 @@ public class PortalManager {
                 }
             }
         }
+
+        // Validate persisted portals in this chunk
+        validatePersistedPortalsInChunk(level, chunkPos, dimension);
+    }
+
+    /**
+     * Validate persisted portals in a chunk
+     * Checks if portal blocks still exist and marks portals as valid/invalid accordingly
+     */
+    private void validatePersistedPortalsInChunk(ClientLevel level, ChunkPos chunkPos, ResourceKey<Level> dimension) {
+        Map<UUID, PortalInfo> dimensionPersistedPortals = persistedPortals.get(dimension);
+        if (dimensionPersistedPortals == null || dimensionPersistedPortals.isEmpty()) {
+            return;
+        }
+
+        int minX = chunkPos.getMinBlockX();
+        int minZ = chunkPos.getMinBlockZ();
+        int maxX = chunkPos.getMaxBlockX();
+        int maxZ = chunkPos.getMaxBlockZ();
+
+        List<UUID> toRemove = new ArrayList<>();
+
+        for (Map.Entry<UUID, PortalInfo> entry : dimensionPersistedPortals.entrySet()) {
+            PortalInfo portal = entry.getValue();
+            BlockPos portalPos = portal.position;
+
+            // Check if portal is in this chunk
+            if (portalPos.getX() < minX || portalPos.getX() > maxX ||
+                portalPos.getZ() < minZ || portalPos.getZ() > maxZ) {
+                continue;
+            }
+
+            // Check if portal blocks still exist
+            boolean portalExists = isPortalStillValid(level, portal);
+
+            if (portalExists) {
+                // Portal is valid, update timestamp
+                portal.setValid(true);
+                portal.setLastValidated(System.currentTimeMillis());
+            } else {
+                // Portal no longer exists, mark for removal
+                portal.setValid(false);
+                toRemove.add(entry.getKey());
+                portalsChanged = true;
+            }
+        }
+
+        // Remove invalid portals
+        for (UUID uuid : toRemove) {
+            dimensionPersistedPortals.remove(uuid);
+        }
+
+        // Save changes if any portals were removed
+        if (!toRemove.isEmpty()) {
+            saveSettingsNow();
+        }
+    }
+
+    /**
+     * Check if a portal still exists at its stored location
+     */
+    private boolean isPortalStillValid(ClientLevel level, PortalInfo portal) {
+        BlockPos centerPos = portal.position;
+
+        // Check if there's a portal block at the center position
+        BlockState centerState = level.getBlockState(centerPos);
+        if (!centerState.is(Blocks.NETHER_PORTAL)) {
+            return false;
+        }
+
+        // Verify the portal orientation matches
+        PortalInfo.Axis currentAxis = getPortalAxis(level, centerPos);
+        if (currentAxis != portal.orientation) {
+            return false;
+        }
+
+        // Portal exists with matching orientation
+        return true;
     }
 
     /**
@@ -363,14 +445,41 @@ public class PortalManager {
 
         if (portals.add(portal)) {
             portalsChanged = true;
+
+            // Also add to persisted portals for cross-session tracking
+            Map<UUID, PortalInfo> dimensionPersistedPortals = persistedPortals.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
+            dimensionPersistedPortals.put(portal.uuid, portal);
+
+            // Save settings to persist the new portal
+            saveSettingsNow();
         }
     }
 
     /**
      * Get all portals in a specific dimension
+     * Returns both live-scanned portals and persisted portals (merged, only valid ones)
      */
     public Set<PortalInfo> getPortalsInDimension(ResourceKey<Level> dimension) {
-        return portalsByDimension.getOrDefault(dimension, Collections.emptySet());
+        Set<PortalInfo> result = new HashSet<>();
+
+        // Add live-scanned portals
+        Set<PortalInfo> livePortals = portalsByDimension.get(dimension);
+        if (livePortals != null) {
+            result.addAll(livePortals);
+        }
+
+        // Add persisted portals (only valid ones not already in live set)
+        Map<UUID, PortalInfo> dimensionPersistedPortals = persistedPortals.get(dimension);
+        if (dimensionPersistedPortals != null) {
+            for (PortalInfo portal : dimensionPersistedPortals.values()) {
+                // Only include valid portals
+                if (portal.isValid()) {
+                    result.add(portal);
+                }
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -403,6 +512,7 @@ public class PortalManager {
      */
     public void clear() {
         portalsByDimension.clear();
+        persistedPortals.clear();
         scannedChunks.clear();
         portalNames.clear();
         portalHues.clear();
@@ -515,6 +625,37 @@ public class PortalManager {
             if (root.has("bordersAlwaysVisible")) {
                 bordersAlwaysVisible = root.get("bordersAlwaysVisible").getAsBoolean();
             }
+
+            // Load persisted portals
+            JsonObject portalsJson = root.getAsJsonObject("portals");
+            if (portalsJson != null) {
+                for (Map.Entry<String, JsonElement> dimensionEntry : portalsJson.entrySet()) {
+                    try {
+                        // Parse dimension key
+                        ResourceLocation dimLocation = ResourceLocation.parse(dimensionEntry.getKey());
+                        ResourceKey<Level> dimension = ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, dimLocation);
+
+                        // Parse portals for this dimension
+                        JsonObject dimensionPortals = dimensionEntry.getValue().getAsJsonObject();
+                        Map<UUID, PortalInfo> portalMap = new ConcurrentHashMap<>();
+
+                        for (Map.Entry<String, JsonElement> portalEntry : dimensionPortals.entrySet()) {
+                            try {
+                                UUID portalUuid = UUID.fromString(portalEntry.getKey());
+                                JsonObject portalJson = portalEntry.getValue().getAsJsonObject();
+                                PortalInfo portal = PortalInfo.fromJson(portalJson);
+                                portalMap.put(portalUuid, portal);
+                            } catch (Exception e) {
+                                System.err.println("[PortalZoneVisualizer] Failed to load portal " + portalEntry.getKey() + ": " + e.getMessage());
+                            }
+                        }
+
+                        persistedPortals.put(dimension, portalMap);
+                    } catch (Exception e) {
+                        System.err.println("[PortalZoneVisualizer] Failed to load portals for dimension " + dimensionEntry.getKey() + ": " + e.getMessage());
+                    }
+                }
+            }
         } catch (Exception e) {
             System.err.println("[PortalZoneVisualizer] Failed to load settings: " + e.getMessage());
         }
@@ -537,6 +678,23 @@ public class PortalManager {
         // Save depth testing settings
         root.addProperty("portalMarkersAlwaysVisible", portalMarkersAlwaysVisible);
         root.addProperty("bordersAlwaysVisible", bordersAlwaysVisible);
+
+        // Save persisted portals
+        JsonObject portalsJson = new JsonObject();
+        for (Map.Entry<ResourceKey<Level>, Map<UUID, PortalInfo>> dimensionEntry : persistedPortals.entrySet()) {
+            ResourceKey<Level> dimension = dimensionEntry.getKey();
+            Map<UUID, PortalInfo> dimensionPortals = dimensionEntry.getValue();
+
+            JsonObject dimensionJson = new JsonObject();
+            for (Map.Entry<UUID, PortalInfo> portalEntry : dimensionPortals.entrySet()) {
+                UUID portalUuid = portalEntry.getKey();
+                PortalInfo portal = portalEntry.getValue();
+                dimensionJson.add(portalUuid.toString(), portal.toJson());
+            }
+
+            portalsJson.add(dimension.location().toString(), dimensionJson);
+        }
+        root.add("portals", portalsJson);
 
         try {
             Files.createDirectories(configPath.getParent());
