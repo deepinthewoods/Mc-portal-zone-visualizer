@@ -54,6 +54,10 @@ public class VoronoiCalculator {
         Quaternionf cameraRot = new Quaternionf(rot);
         Vector3f forward = new Vector3f(0f, 0f, 1f).rotate(cameraRot);
 
+        // Render borders with depth control
+        boolean bordersAlwaysVisible = PortalManager.getInstance().isBordersAlwaysVisible();
+        boolean bordersUseDepth = !bordersAlwaysVisible;
+
         // Render cached edges with world coordinates (PoseStack is already camera-relative)
         for (VoronoiEdge edge : cachedEdges) {
             Vector3f color = edge.color;
@@ -63,7 +67,8 @@ public class VoronoiCalculator {
                 0x00F000F0,
                 edge.start.x, edge.start.y, edge.start.z,
                 edge.end.x, edge.end.y, edge.end.z,
-                forward);
+                forward,
+                bordersUseDepth);
         }
     }
 

@@ -39,7 +39,9 @@ public class PortalManager {
     private final Map<ResourceKey<Level>, Set<PortalInfo>> portalsByDimension = new ConcurrentHashMap<>();
 
     // Track which chunks have been scanned
-    private final Map<ResourceKey<Level>, Set<ChunkPos>> scannedChunks = new ConcurrentHashMap<>();
+    private final Map<ResourceKey<Level>, Map<ChunkPos, Long>> scannedChunks = new ConcurrentHashMap<>();
+
+    private static final long RESCAN_INTERVAL_TICKS = 200;
 
     // Flag to indicate portals have changed (for Voronoi recalculation)
     private boolean portalsChanged = true;
@@ -49,6 +51,10 @@ public class PortalManager {
 
     // Store custom hues for portals (persistent across rescans)
     private final Map<UUID, Float> portalHues = new ConcurrentHashMap<>();
+
+    // Depth testing settings
+    private boolean portalMarkersAlwaysVisible = true; // Default: always visible
+    private boolean bordersAlwaysVisible = false; // Default: respect occlusion
 
     private PortalManager() {
         this.configPath = FabricLoader.getInstance().getConfigDir().resolve(CONFIG_FILE);
@@ -83,6 +89,7 @@ public class PortalManager {
     private void scanLoadedChunks(ClientLevel level) {
         ResourceKey<Level> dimension = level.dimension();
         Minecraft mc = Minecraft.getInstance();
+        long currentTick = level.getGameTime();
 
         if (mc.player == null) {
             return;
@@ -113,15 +120,16 @@ public class PortalManager {
                     continue;
                 }
 
-                // Skip if already scanned
-                Set<ChunkPos> scanned = scannedChunks.computeIfAbsent(dimension, k -> ConcurrentHashMap.newKeySet());
-                if (scanned.contains(chunkPos)) {
+                // Skip if recently scanned
+                Map<ChunkPos, Long> scanned = scannedChunks.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
+                Long lastScannedTick = scanned.get(chunkPos);
+                if (lastScannedTick != null && currentTick - lastScannedTick < RESCAN_INTERVAL_TICKS) {
                     continue;
                 }
 
                 // Scan this chunk for portals
                 scanChunk(level, chunk, dimension);
-                scanned.add(chunkPos);
+                scanned.put(chunkPos, currentTick);
             }
         }
     }
@@ -451,6 +459,34 @@ public class PortalManager {
         return PortalInfo.colorFromHue(getPortalHue(portal));
     }
 
+    /**
+     * Set whether portal markers should always be visible (no depth testing)
+     */
+    public void setPortalMarkersAlwaysVisible(boolean alwaysVisible) {
+        this.portalMarkersAlwaysVisible = alwaysVisible;
+    }
+
+    /**
+     * Get whether portal markers should always be visible (no depth testing)
+     */
+    public boolean isPortalMarkersAlwaysVisible() {
+        return portalMarkersAlwaysVisible;
+    }
+
+    /**
+     * Set whether borders should always be visible (no depth testing)
+     */
+    public void setBordersAlwaysVisible(boolean alwaysVisible) {
+        this.bordersAlwaysVisible = alwaysVisible;
+    }
+
+    /**
+     * Get whether borders should always be visible (no depth testing)
+     */
+    public boolean isBordersAlwaysVisible() {
+        return bordersAlwaysVisible;
+    }
+
     private void loadSettings() {
         if (!Files.exists(configPath)) {
             return;
@@ -471,6 +507,14 @@ public class PortalManager {
                     portalHues.put(UUID.fromString(entry.getKey()), entry.getValue().getAsFloat());
                 }
             }
+
+            // Load depth testing settings
+            if (root.has("portalMarkersAlwaysVisible")) {
+                portalMarkersAlwaysVisible = root.get("portalMarkersAlwaysVisible").getAsBoolean();
+            }
+            if (root.has("bordersAlwaysVisible")) {
+                bordersAlwaysVisible = root.get("bordersAlwaysVisible").getAsBoolean();
+            }
         } catch (Exception e) {
             System.err.println("[PortalZoneVisualizer] Failed to load settings: " + e.getMessage());
         }
@@ -490,6 +534,10 @@ public class PortalManager {
         }
         root.add("portalHues", hues);
 
+        // Save depth testing settings
+        root.addProperty("portalMarkersAlwaysVisible", portalMarkersAlwaysVisible);
+        root.addProperty("bordersAlwaysVisible", bordersAlwaysVisible);
+
         try {
             Files.createDirectories(configPath.getParent());
             try (var writer = Files.newBufferedWriter(configPath, StandardCharsets.UTF_8)) {
@@ -504,7 +552,7 @@ public class PortalManager {
      * Invalidate chunks (e.g., when blocks change)
      */
     public void invalidateChunk(ResourceKey<Level> dimension, ChunkPos chunkPos) {
-        Set<ChunkPos> scanned = scannedChunks.get(dimension);
+        Map<ChunkPos, Long> scanned = scannedChunks.get(dimension);
         if (scanned != null) {
             scanned.remove(chunkPos);
         }

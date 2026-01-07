@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
@@ -30,6 +31,8 @@ public class PortalManagementScreen extends Screen {
     private final List<PortalEntry> portalEntries = new ArrayList<>();
     private int scrollOffset = 0;
     private int maxScroll = 0;
+    private Checkbox portalMarkersCheckbox;
+    private Checkbox bordersCheckbox;
 
     public PortalManagementScreen(Screen parent) {
         super(Component.translatable("gui.portal-zone-visualizer.portal_list"));
@@ -44,6 +47,31 @@ public class PortalManagementScreen extends Screen {
                 button -> this.minecraft.setScreen(parent))
             .bounds(this.width / 2 - 100, this.height - 28, 200, 20)
             .build());
+
+        // Add checkboxes for depth testing
+        PortalManager manager = PortalManager.getInstance();
+
+        portalMarkersCheckbox = Checkbox.builder(
+                Component.literal("Portal Markers Always Visible"),
+                this.font)
+            .pos(10, 10)
+            .selected(manager.isPortalMarkersAlwaysVisible())
+            .onValueChange((checkbox, selected) -> {
+                manager.setPortalMarkersAlwaysVisible(selected);
+            })
+            .build();
+        this.addRenderableWidget(portalMarkersCheckbox);
+
+        bordersCheckbox = Checkbox.builder(
+                Component.literal("Borders Always Visible"),
+                this.font)
+            .pos(10, 25)
+            .selected(manager.isBordersAlwaysVisible())
+            .onValueChange((checkbox, selected) -> {
+                manager.setBordersAlwaysVisible(selected);
+            })
+            .build();
+        this.addRenderableWidget(bordersCheckbox);
 
         // Load portals
         loadPortals();

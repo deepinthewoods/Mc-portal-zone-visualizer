@@ -2,6 +2,8 @@ package com.portalzone.render;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.platform.DepthTestFunction;
 import com.portalzone.PortalZoneVisualizerClient;
 import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalManager;
@@ -10,6 +12,8 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -18,6 +22,7 @@ import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
+import java.util.OptionalDouble;
 import java.util.Set;
 
 /**
@@ -28,6 +33,7 @@ public class PortalRenderer {
     private static final float MARKER_SIZE = 3.0f; // 3 blocks in-game size
     private static final int MIN_PIXEL_SIZE = 20; // Minimum 20 pixels on screen
     private static final int MAX_RENDER_DISTANCE = 256; // Max render distance in blocks
+    private static final RenderType LINES_NO_DEPTH = createNoDepthLines();
 
     public static void render(PoseStack matrices, Camera camera, MultiBufferSource bufferSource) {
         // Check if rendering is enabled
@@ -44,13 +50,17 @@ public class PortalRenderer {
         Vec3 camPos = camera.getPosition();
         ResourceKey<Level> currentDim = mc.level.dimension();
 
+        // Render portal markers with depth control
+        boolean portalMarkersAlwaysVisible = PortalManager.getInstance().isPortalMarkersAlwaysVisible();
+        boolean portalMarkersUseDepth = !portalMarkersAlwaysVisible;
+
         // Render portals in current dimension (as circles)
         Set<PortalInfo> currentDimPortals = PortalManager.getInstance().getPortalsInDimension(currentDim);
         for (PortalInfo portal : currentDimPortals) {
             double distance = portal.getCenterPos().distanceTo(camPos);
             if (distance > MAX_RENDER_DISTANCE) continue;
 
-            renderPortalCircle(matrices, bufferSource, camPos, portal, camera);
+            renderPortalCircle(matrices, bufferSource, camPos, portal, camera, portalMarkersUseDepth);
         }
 
         // Render portals in other dimension (as X marks with translated coordinates)
@@ -62,10 +72,10 @@ public class PortalRenderer {
             double distance = translatedPos.distanceTo(camPos);
             if (distance > MAX_RENDER_DISTANCE) continue;
 
-            renderPortalX(matrices, bufferSource, camPos, portal, translatedPos, camera);
+            renderPortalX(matrices, bufferSource, camPos, portal, translatedPos, camera, portalMarkersUseDepth);
         }
 
-        // Render Voronoi borders
+        // Render Voronoi borders (with depth control)
         VoronoiCalculator.getInstance().render(matrices, bufferSource, camPos, currentDim, camera);
     }
 
@@ -73,7 +83,7 @@ public class PortalRenderer {
      * Render a portal as a billboard circle in its actual dimension
      */
     private static void renderPortalCircle(PoseStack matrices, MultiBufferSource bufferSource,
-                                           Vec3 camPos, PortalInfo portal, Camera camera) {
+                                           Vec3 camPos, PortalInfo portal, Camera camera, boolean useDepthTest) {
         Vec3 worldPos = portal.getCenterPos();
         double distance = worldPos.distanceTo(camPos);
 
@@ -87,7 +97,7 @@ public class PortalRenderer {
         Vec3 pos = worldPos;
 
         // Draw circle as billboard
-        drawBillboardCircle(matrices, bufferSource, pos, size, color.x, color.y, color.z, 0.8f, camera);
+        drawBillboardCircle(matrices, bufferSource, pos, size, color.x, color.y, color.z, 0.8f, camera, useDepthTest);
 
         // Draw label below the circle
         Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
@@ -99,7 +109,7 @@ public class PortalRenderer {
      * Render a portal as a billboard X mark with translated coordinates
      */
     private static void renderPortalX(PoseStack matrices, MultiBufferSource bufferSource,
-                                      Vec3 camPos, PortalInfo portal, Vec3 translatedPos, Camera camera) {
+                                      Vec3 camPos, PortalInfo portal, Vec3 translatedPos, Camera camera, boolean useDepthTest) {
         double distance = translatedPos.distanceTo(camPos);
 
         // Calculate size with minimum pixel size
@@ -112,7 +122,7 @@ public class PortalRenderer {
         Vec3 pos = translatedPos;
 
         // Draw X mark as billboard
-        drawBillboardX(matrices, bufferSource, pos, size, color.x, color.y, color.z, 0.8f, camera);
+        drawBillboardX(matrices, bufferSource, pos, size, color.x, color.y, color.z, 0.8f, camera, useDepthTest);
 
         // Draw label below the X
         Vec3 labelOffset = new Vec3(0, -size * 1.5, 0);
@@ -143,7 +153,8 @@ public class PortalRenderer {
      * Draw a billboard circle facing the camera
      */
     private static void drawBillboardCircle(PoseStack matrices, MultiBufferSource bufferSource,
-                                            Vec3 center, float size, float r, float g, float b, float a, Camera camera) {
+                                            Vec3 center, float size, float r, float g, float b, float a, Camera camera,
+                                            boolean useDepthTest) {
         var rot = camera.rotation();
 
         // Camera rotation already faces the camera; use it directly for billboard axes
@@ -176,7 +187,7 @@ public class PortalRenderer {
             if (prevPoint != null) {
                 submitLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
                     prevPoint.x, prevPoint.y, prevPoint.z,
-                    point.x, point.y, point.z, forward);
+                    point.x, point.y, point.z, forward, useDepthTest);
             }
 
             prevPoint = point;
@@ -187,7 +198,8 @@ public class PortalRenderer {
      * Draw a billboard X mark facing the camera
      */
     private static void drawBillboardX(PoseStack matrices, MultiBufferSource bufferSource,
-                                       Vec3 center, float size, float r, float g, float b, float a, Camera camera) {
+                                       Vec3 center, float size, float r, float g, float b, float a, Camera camera,
+                                       boolean useDepthTest) {
         var rot = camera.rotation();
 
         // Camera rotation already faces the camera; use it directly for billboard axes
@@ -211,11 +223,11 @@ public class PortalRenderer {
         // Draw X (two diagonals)
         submitLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
             topLeft.x, topLeft.y, topLeft.z,
-            bottomRight.x, bottomRight.y, bottomRight.z, forward);
+            bottomRight.x, bottomRight.y, bottomRight.z, forward, useDepthTest);
 
         submitLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
             topRight.x, topRight.y, topRight.z,
-            bottomLeft.x, bottomLeft.y, bottomLeft.z, forward);
+            bottomLeft.x, bottomLeft.y, bottomLeft.z, forward, useDepthTest);
     }
 
     /**
@@ -224,8 +236,8 @@ public class PortalRenderer {
     public static void submitLine(PoseStack matrices, MultiBufferSource bufferSource,
                                    float r, float g, float b, float a, int light,
                                    double ax, double ay, double az, double bx, double by, double bz,
-                                   Vector3f normal) {
-        RenderType renderType = RenderType.lines();
+                                   Vector3f normal, boolean useDepthTest) {
+        RenderType renderType = useDepthTest ? RenderType.lines() : LINES_NO_DEPTH;
         VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
         Matrix4f pose = matrices.last().pose();
 
@@ -275,5 +287,25 @@ public class PortalRenderer {
 
         // Restore pose stack state
         matrices.popPose();
+    }
+
+    private static RenderType createNoDepthLines() {
+        RenderPipeline pipeline = RenderPipeline.builder(RenderPipelines.LINES_SNIPPET)
+            .withLocation("pipeline/portal_zone_lines_no_depth")
+            .withDepthTestFunction(DepthTestFunction.NO_DEPTH_TEST)
+            .withDepthWrite(false)
+            .build();
+
+        RenderType.CompositeState.CompositeStateBuilder builder = RenderType.CompositeState.builder()
+            .setLineState(new RenderStateShard.LineStateShard(OptionalDouble.empty()))
+            .setLayeringState(RenderStateShard.VIEW_OFFSET_Z_LAYERING)
+            .setOutputState(RenderStateShard.ITEM_ENTITY_TARGET);
+
+        return RenderType.create(
+            "portal_zone_lines_no_depth",
+            1536,
+            RenderPipelines.register(pipeline),
+            builder.createCompositeState(false)
+        );
     }
 }
