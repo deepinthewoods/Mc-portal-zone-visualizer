@@ -5,6 +5,7 @@ import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalLinkingAlgorithm;
 import com.portalzone.portal.PortalManager;
 import com.portalzone.render.PortalRenderer;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.Camera;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.resources.ResourceKey;
@@ -15,9 +16,7 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,8 +37,6 @@ public class VoronoiCalculator {
     // Neutral zone color (for areas with no portal in range)
     private static final Vector3f NEUTRAL_ZONE_COLOR = new Vector3f(0.8f, 0.8f, 0.8f);
     private static final int SKIP_INDEX = -2;
-    private static final double BORDER_OFFSET = 1.0 / 16.0;
-
     // Cached Voronoi edges
     private final AtomicReference<ConcurrentLinkedQueue<VoronoiEdge>> cachedEdges =
         new AtomicReference<>(new ConcurrentLinkedQueue<>());
@@ -101,12 +98,16 @@ public class VoronoiCalculator {
         float borderFuzzThreshold = PortalManager.getInstance().getBorderFuzzThreshold();
         int fuzzStartDistance = PortalManager.getInstance().getBorderFuzzStartDistance();
 
+        Minecraft mc = Minecraft.getInstance();
+        long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
+        boolean usePrimaryColor = ((gameTime / 5L) % 2L) == 0L;
+
         // Render cached edges with world coordinates (PoseStack is already camera-relative)
         for (VoronoiEdge edge : cachedEdges.get()) {
             if (!shouldRenderEdge(edge, camPos, borderFuzzThreshold, fuzzStartDistance)) {
                 continue;
             }
-            Vector3f color = edge.color;
+            Vector3f color = usePrimaryColor ? edge.primaryColor : edge.secondaryColor;
 
             PortalRenderer.submitLine(matrices, bufferSource,
                 color.x, color.y, color.z, 0.6f,
@@ -291,15 +292,17 @@ public class VoronoiCalculator {
     private static class VoronoiEdge {
         final Vec3 start;
         final Vec3 end;
-        final Vector3f color;
+        final Vector3f primaryColor;
+        final Vector3f secondaryColor;
         final int spacing;
         final boolean alwaysRender;
         final int hash;
 
-        VoronoiEdge(Vec3 start, Vec3 end, Vector3f color, int spacing) {
+        VoronoiEdge(Vec3 start, Vec3 end, Vector3f primaryColor, Vector3f secondaryColor, int spacing) {
             this.start = start;
             this.end = end;
-            this.color = color;
+            this.primaryColor = primaryColor;
+            this.secondaryColor = secondaryColor;
             this.spacing = spacing;
             this.alwaysRender = spacing == 1;
             this.hash = hashEdge(start, end);
@@ -422,26 +425,6 @@ public class VoronoiCalculator {
         // Direction from one grid point to the other (perpendicular to the border surface)
         Vec3 borderNormal = direction.normalize();
 
-        // Calculate two perpendicular tangent vectors for true 3D border rendering
-        // This creates a small cross/patch at each border point instead of just horizontal lines
-        Vec3 tangent1, tangent2;
-
-        // Choose first tangent perpendicular to border normal
-        if (Math.abs(borderNormal.y) < 0.9) {
-            // If not nearly vertical, use the cross product with up vector
-            tangent1 = new Vec3(0, 1, 0).cross(borderNormal).normalize();
-        } else {
-            // If nearly vertical, use the cross product with right vector
-            tangent1 = new Vec3(1, 0, 0).cross(borderNormal).normalize();
-        }
-
-        // Second tangent is perpendicular to both border normal and tangent1
-        tangent2 = borderNormal.cross(tangent1).normalize();
-
-        // Scale tangents to spacing size
-        tangent1 = tangent1.scale(spacing * 0.5);
-        tangent2 = tangent2.scale(spacing * 0.5);
-
         // Check if this is a vertical edge (for the vertical borders checkbox)
         if (Math.abs(borderNormal.y) > 0.9 && !showVerticalBorders) {
             return;
@@ -460,231 +443,66 @@ public class VoronoiCalculator {
             color2 = portalColors[portal2];
         }
 
-        // Create a rectangular frame pattern where lines of the same color connect at endpoints
-        // Offset each line perpendicular to its own axis, and offset along the border normal
-        Vec3 normalOffset = borderNormal.scale(BORDER_OFFSET);
-
-        // Draw lines along tangent1 (offset by ±tangent2)
-        Vec3 edge1Start = midpoint.subtract(tangent1).add(tangent2);
-        Vec3 edge1End = midpoint.add(tangent1).add(tangent2);
-        edges.add(new VoronoiEdge(edge1Start.add(normalOffset), edge1End.add(normalOffset), color1, spacing));
-        edges.add(new VoronoiEdge(edge1Start.subtract(normalOffset), edge1End.subtract(normalOffset), color2, spacing));
-
-        Vec3 edge2Start = midpoint.subtract(tangent1).subtract(tangent2);
-        Vec3 edge2End = midpoint.add(tangent1).subtract(tangent2);
-        edges.add(new VoronoiEdge(edge2Start.add(normalOffset), edge2End.add(normalOffset), color1, spacing));
-        edges.add(new VoronoiEdge(edge2Start.subtract(normalOffset), edge2End.subtract(normalOffset), color2, spacing));
-
-        // Draw lines along tangent2 (offset by ±tangent1)
-        Vec3 edge3Start = midpoint.add(tangent1).subtract(tangent2);
-        Vec3 edge3End = midpoint.add(tangent1).add(tangent2);
-        edges.add(new VoronoiEdge(edge3Start.add(normalOffset), edge3End.add(normalOffset), color1, spacing));
-        edges.add(new VoronoiEdge(edge3Start.subtract(normalOffset), edge3End.subtract(normalOffset), color2, spacing));
-
-        Vec3 edge4Start = midpoint.subtract(tangent1).subtract(tangent2);
-        Vec3 edge4End = midpoint.subtract(tangent1).add(tangent2);
-        edges.add(new VoronoiEdge(edge4Start.add(normalOffset), edge4End.add(normalOffset), color1, spacing));
-        edges.add(new VoronoiEdge(edge4Start.subtract(normalOffset), edge4End.subtract(normalOffset), color2, spacing));
-    }
-
-    /**
-     * Calculate Voronoi edges using hexagonal grid (for spacing > 1, farther from player).
-     */
-    private boolean calculateVoronoiZonesHexagonal(RecalcRequest request,
-                                                   double[] portalX, double[] portalY, double[] portalZ,
-                                                   int minRadius, int maxRadius, int hexRadius,
-                                                   ConcurrentLinkedQueue<VoronoiEdge> edgesQueue) {
-        Vec3 playerPos = request.playerPos;
-
-        // Generate hexagonal grid cells within the LOD ring
-        // We'll iterate over a bounding box and generate hex cells, then filter by distance
-        Map<HexGrid.HexCoord, Integer> hexPortalMap = new HashMap<>();
-
-        // Calculate bounds for hexagon generation
-        int minY = Math.max((int) Math.floor(playerPos.y - maxRadius), -64);
-        int maxY = Math.min((int) Math.ceil(playerPos.y + maxRadius), 320);
-
-        // Estimate hex grid bounds (conservative estimate)
-        int hexGridRadius = (int) Math.ceil(maxRadius / hexRadius) + 2;
-
-        // Center hex at player position
-        HexGrid.HexCoord centerHex = HexGrid.worldToHex(playerPos.x, playerPos.y, playerPos.z, hexRadius);
-
-        // Generate hexagons in a radius around the player
-        for (int yLevel = minY; yLevel <= maxY; yLevel += hexRadius) {
-            HexGrid.HexCoord centerAtY = new HexGrid.HexCoord(centerHex.q, centerHex.r, yLevel);
-            List<HexGrid.HexCoord> hexesAtLevel = HexGrid.getHexesInRadius(centerAtY, hexGridRadius);
-
-            for (HexGrid.HexCoord hex : hexesAtLevel) {
-                if (request.id != latestRequestId) {
-                    return false;
-                }
-
-                Vec3 hexCenter = HexGrid.hexToWorld(hex, hexRadius);
-                double dx = hexCenter.x - playerPos.x;
-                double dy = hexCenter.y - playerPos.y;
-                double dz = hexCenter.z - playerPos.z;
-                double distSq = dx * dx + dy * dy + dz * dz;
-                double dist = Math.sqrt(distSq);
-
-                // Check if within LOD ring (using 3D distance)
-                if (dist < minRadius || dist > maxRadius) {
-                    continue;
-                }
-
-                // Find nearest portal for this hex center
-                int portalIndex = findNearestPortalIndex(
-                    hexCenter.x, hexCenter.y, hexCenter.z,
-                    request.currentDim, request.portalCenters,
-                    portalX, portalY, portalZ, request.useLinkingAlgorithm);
-
-                hexPortalMap.put(hex, portalIndex);
+        // Normalize blink ordering so all segments for a portal pair blink in sync.
+        Vector3f primaryColor;
+        Vector3f secondaryColor;
+        if (portal1 == -1 && portal2 >= 0) {
+            primaryColor = portalColors[portal2];
+            secondaryColor = NEUTRAL_ZONE_COLOR;
+        } else if (portal2 == -1 && portal1 >= 0) {
+            primaryColor = portalColors[portal1];
+            secondaryColor = NEUTRAL_ZONE_COLOR;
+        } else if (portal1 >= 0 && portal2 >= 0) {
+            if (portal1 <= portal2) {
+                primaryColor = color1;
+                secondaryColor = color2;
+            } else {
+                primaryColor = color2;
+                secondaryColor = color1;
             }
-        }
-
-        // Generate edges where portal zones change between adjacent hexagons
-        List<VoronoiEdge> edges = new ArrayList<>();
-        for (Map.Entry<HexGrid.HexCoord, Integer> entry : hexPortalMap.entrySet()) {
-            if (request.id != latestRequestId) {
-                return false;
-            }
-
-            HexGrid.HexCoord hex = entry.getKey();
-            int portalIndex = entry.getValue();
-
-            if (portalIndex == SKIP_INDEX) {
-                continue;
-            }
-
-            // Check horizontal neighbors (6 directions)
-            HexGrid.HexCoord[] neighbors = HexGrid.getNeighbors(hex);
-            for (HexGrid.HexCoord neighbor : neighbors) {
-                Integer neighborPortal = hexPortalMap.get(neighbor);
-                if (neighborPortal != null && neighborPortal != SKIP_INDEX && portalIndex != neighborPortal) {
-                    // Draw edge between these hexagons
-                    Vec3 edgeMidpoint = HexGrid.getEdgeMidpoint(hex, neighbor, hexRadius);
-                    if (edgeMidpoint != null) {
-                        addHexEdge(edges, hex, neighbor, portalIndex, neighborPortal,
-                            edgeMidpoint, hexRadius, request.portalCenters, request.portalColors,
-                            request.showNeutralBorders);
-                    }
-                }
-            }
-
-            // Vertical borders checkbox only affects LOD 0 (rectangular grid), not hexagonal grids
-            // Hexagonal grids don't render vertical neighbors to maintain performance at higher LODs
-        }
-
-        edgesQueue.addAll(edges);
-        return true;
-    }
-
-    /**
-     * Add edge lines between two adjacent hexagons with different portal zones.
-     */
-    private void addHexEdge(List<VoronoiEdge> edges, HexGrid.HexCoord hex1, HexGrid.HexCoord hex2,
-                            int portal1Index, int portal2Index, Vec3 edgeMidpoint, double hexRadius,
-                            Vec3[] portalCenters, Vector3f[] portalColors, boolean showNeutralBorders) {
-        // Calculate direction between hex centers (perpendicular to the border surface)
-        Vec3 center1 = HexGrid.hexToWorld(hex1, hexRadius);
-        Vec3 center2 = HexGrid.hexToWorld(hex2, hexRadius);
-        Vec3 direction = center2.subtract(center1);
-
-        if (direction.lengthSqr() == 0.0) {
+        } else {
             return;
         }
 
-        Vec3 borderNormal = direction.normalize();
+        // Draw grid lines aligned with axes, centered on the border plane.
+        Vec3 center = midpoint;
+        double halfSpacing = spacing * 0.5;
 
-        // Calculate two perpendicular tangent vectors for true 3D border rendering
-        Vec3 tangent1, tangent2;
-
-        // Choose first tangent perpendicular to border normal
-        if (Math.abs(borderNormal.y) < 0.9) {
-            tangent1 = new Vec3(0, 1, 0).cross(borderNormal).normalize();
-        } else {
-            tangent1 = new Vec3(1, 0, 0).cross(borderNormal).normalize();
+        // Determine which axis the border is perpendicular to
+        // and draw lines along the other two axes
+        if (Math.abs(direction.x) > 0.1 && Math.abs(direction.y) < 0.1 && Math.abs(direction.z) < 0.1) {
+            // Border normal along X axis - draw lines along Y and Z
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x, center.y - halfSpacing, center.z),
+                new Vec3(center.x, center.y + halfSpacing, center.z),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x, center.y, center.z - halfSpacing),
+                new Vec3(center.x, center.y, center.z + halfSpacing),
+                primaryColor, secondaryColor, spacing));
+        } else if (Math.abs(direction.y) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.z) < 0.1) {
+            // Border normal along Y axis - draw lines along X and Z
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x - halfSpacing, center.y, center.z),
+                new Vec3(center.x + halfSpacing, center.y, center.z),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x, center.y, center.z - halfSpacing),
+                new Vec3(center.x, center.y, center.z + halfSpacing),
+                primaryColor, secondaryColor, spacing));
+        } else if (Math.abs(direction.z) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.y) < 0.1) {
+            // Border normal along Z axis - draw lines along X and Y
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x - halfSpacing, center.y, center.z),
+                new Vec3(center.x + halfSpacing, center.y, center.z),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x, center.y - halfSpacing, center.z),
+                new Vec3(center.x, center.y + halfSpacing, center.z),
+                primaryColor, secondaryColor, spacing));
         }
-
-        // Second tangent is perpendicular to both border normal and tangent1
-        tangent2 = borderNormal.cross(tangent1).normalize();
-
-        // Scale tangents
-        tangent1 = tangent1.scale(hexRadius * 0.45);
-        tangent2 = tangent2.scale(hexRadius * 0.45);
-
-        // Determine colors
-        Vector3f color1, color2;
-        if (portal1Index == -1 || portal2Index == -1) {
-            if (!showNeutralBorders) {
-                return;
-            }
-            color1 = portal1Index == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal1Index];
-            color2 = portal2Index == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal2Index];
-        } else {
-            color1 = portalColors[portal1Index];
-            color2 = portalColors[portal2Index];
-        }
-
-        // Create a rectangular frame pattern where lines of the same color connect at endpoints
-        // Offset each line perpendicular to its own axis, and offset along the border normal
-        Vec3 normalOffset = borderNormal.scale(BORDER_OFFSET);
-
-        // Draw lines along tangent1 (offset by ±tangent2)
-        Vec3 edge1Start = edgeMidpoint.subtract(tangent1).add(tangent2);
-        Vec3 edge1End = edgeMidpoint.add(tangent1).add(tangent2);
-        edges.add(new VoronoiEdge(edge1Start.add(normalOffset), edge1End.add(normalOffset), color1, (int) hexRadius));
-        edges.add(new VoronoiEdge(edge1Start.subtract(normalOffset), edge1End.subtract(normalOffset), color2, (int) hexRadius));
-
-        Vec3 edge2Start = edgeMidpoint.subtract(tangent1).subtract(tangent2);
-        Vec3 edge2End = edgeMidpoint.add(tangent1).subtract(tangent2);
-        edges.add(new VoronoiEdge(edge2Start.add(normalOffset), edge2End.add(normalOffset), color1, (int) hexRadius));
-        edges.add(new VoronoiEdge(edge2Start.subtract(normalOffset), edge2End.subtract(normalOffset), color2, (int) hexRadius));
-
-        // Draw lines along tangent2 (offset by ±tangent1)
-        Vec3 edge3Start = edgeMidpoint.add(tangent1).subtract(tangent2);
-        Vec3 edge3End = edgeMidpoint.add(tangent1).add(tangent2);
-        edges.add(new VoronoiEdge(edge3Start.add(normalOffset), edge3End.add(normalOffset), color1, (int) hexRadius));
-        edges.add(new VoronoiEdge(edge3Start.subtract(normalOffset), edge3End.subtract(normalOffset), color2, (int) hexRadius));
-
-        Vec3 edge4Start = edgeMidpoint.subtract(tangent1).subtract(tangent2);
-        Vec3 edge4End = edgeMidpoint.subtract(tangent1).add(tangent2);
-        edges.add(new VoronoiEdge(edge4Start.add(normalOffset), edge4End.add(normalOffset), color1, (int) hexRadius));
-        edges.add(new VoronoiEdge(edge4Start.subtract(normalOffset), edge4End.subtract(normalOffset), color2, (int) hexRadius));
     }
 
-    /**
-     * Add vertical edge between hexagons at different Y levels.
-     */
-    private void addVerticalHexEdge(List<VoronoiEdge> edges, int portal1Index, int portal2Index,
-                                    Vec3 edgeMidpoint, double hexRadius,
-                                    Vec3[] portalCenters, Vector3f[] portalColors, boolean showNeutralBorders) {
-        // For vertical edges, create a small horizontal line
-        Vec3 tangent = new Vec3(hexRadius * 0.5, 0, 0);
-        Vec3 start = edgeMidpoint.subtract(tangent);
-        Vec3 end = edgeMidpoint.add(tangent);
-
-        // Handle neutral zones
-        if (portal1Index == -1 || portal2Index == -1) {
-            if (!showNeutralBorders) {
-                return;
-            }
-            Vector3f color = portal1Index == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal1Index];
-            if (portal2Index != -1) {
-                color = portalColors[portal2Index];
-            }
-            edges.add(new VoronoiEdge(start, end, color, (int) hexRadius));
-            return;
-        }
-
-        // Add colored edges
-        Vector3f color1 = portalColors[portal1Index];
-        Vector3f color2 = portalColors[portal2Index];
-
-        Vec3 offset = new Vec3(0, BORDER_OFFSET, 0);
-        edges.add(new VoronoiEdge(start.subtract(offset), end.subtract(offset), color1, (int) hexRadius));
-        edges.add(new VoronoiEdge(start.add(offset), end.add(offset), color2, (int) hexRadius));
-    }
 
     private static boolean shouldRenderEdge(VoronoiEdge edge, Vec3 camPos, float fuzzThreshold, int fuzzStartDistance) {
         // LOD 0 (spacing == 1) always renders every line with 0% drop

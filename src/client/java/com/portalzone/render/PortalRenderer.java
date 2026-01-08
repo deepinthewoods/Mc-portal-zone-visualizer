@@ -256,18 +256,19 @@ public class PortalRenderer {
         RenderType renderType = useDepthTest ? LINES_DEPTH : LINES_NO_DEPTH;
         VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
         Matrix4f pose = matrices.last().pose();
+        Vector3f dir = new Vector3f((float) (bx - ax), (float) (by - ay), (float) (bz - az));
 
         // First vertex
         vertexConsumer.addVertex(pose, (float)ax, (float)ay, (float)az)
                 .setColor(r, g, b, a)
                 .setLight(light)
-                .setNormal(matrices.last(), normal.x, normal.y, normal.z);
+                .setNormal(matrices.last(), dir.x, dir.y, dir.z);
 
         // Second vertex
         vertexConsumer.addVertex(pose, (float)bx, (float)by, (float)bz)
                 .setColor(r, g, b, a)
                 .setLight(light)
-                .setNormal(matrices.last(), normal.x, normal.y, normal.z);
+                .setNormal(matrices.last(), -dir.x, -dir.y, -dir.z);
     }
 
     /**
@@ -280,18 +281,19 @@ public class PortalRenderer {
         RenderType renderType = useDepthTest ? MARKER_LINES_DEPTH : MARKER_LINES_NO_DEPTH;
         VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
         Matrix4f pose = matrices.last().pose();
+        Vector3f dir = new Vector3f((float) (bx - ax), (float) (by - ay), (float) (bz - az));
 
         // First vertex
         vertexConsumer.addVertex(pose, (float)ax, (float)ay, (float)az)
                 .setColor(r, g, b, a)
                 .setLight(light)
-                .setNormal(matrices.last(), normal.x, normal.y, normal.z);
+                .setNormal(matrices.last(), dir.x, dir.y, dir.z);
 
         // Second vertex
         vertexConsumer.addVertex(pose, (float)bx, (float)by, (float)bz)
                 .setColor(r, g, b, a)
                 .setLight(light)
-                .setNormal(matrices.last(), normal.x, normal.y, normal.z);
+                .setNormal(matrices.last(), -dir.x, -dir.y, -dir.z);
     }
 
     /**
