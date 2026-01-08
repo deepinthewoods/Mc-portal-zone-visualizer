@@ -30,8 +30,8 @@ public class VoronoiCalculator {
 
     // LOD (Level of Detail) constants
     private static final int MAX_BORDER_DISTANCE = 2048; // Increase to render farther borders.
-    private static final int[] BASE_LOD_RADII = new int[] {128, 256, 512, MAX_BORDER_DISTANCE};
-    private static final int[] LOD_SPACING = new int[] {1, 2, 4, 8, 16};
+    private static final int[] BASE_LOD_RADII = new int[] {512};
+    private static final int[] LOD_SPACING = new int[] {1, 8};
     private static final int TILE_SIZE = 128;
 
     // Neutral zone color (for areas with no portal in range)
@@ -48,7 +48,6 @@ public class VoronoiCalculator {
     private RecalcRequest pendingRequest = null;
     private final AtomicLong requestId = new AtomicLong();
     private volatile long latestRequestId = 0;
-    private static final double RECALC_DISTANCE_THRESHOLD = 32.0; // Recalculate if player moves 32 blocks
 
     private VoronoiCalculator() {
         Thread worker = new Thread(this::recalcLoop, "PortalZoneVoronoiWorker");
@@ -66,10 +65,11 @@ public class VoronoiCalculator {
      */
     public void render(PoseStack matrices, MultiBufferSource bufferSource, Vec3 camPos, ResourceKey<Level> currentDim, Camera camera) {
         // Recalculate if portals have changed, dimension changed, or player moved significantly
+        double recalcDistanceThreshold = getRecalcDistanceThreshold();
         boolean needsRecalc = PortalManager.getInstance().hasPortalsChanged()
                            || !currentDim.equals(cachedDimension)
                            || cachedPlayerPos == null
-                           || camPos.distanceTo(cachedPlayerPos) > RECALC_DISTANCE_THRESHOLD;
+                           || camPos.distanceTo(cachedPlayerPos) > recalcDistanceThreshold;
 
         if (needsRecalc) {
             if (shouldQueueRecalc(camPos, currentDim)) {
@@ -367,7 +367,7 @@ public class VoronoiCalculator {
                     }
                     int index = ((ix * yCount) + iy) * zCount + iz;
                     int portalIndex = nearestPortalIdx[index];
-                    if (portalIndex < 0) {
+                    if (portalIndex == SKIP_INDEX) {
                         continue;
                     }
 
@@ -467,38 +467,64 @@ public class VoronoiCalculator {
         // Draw grid lines aligned with axes, centered on the border plane.
         Vec3 center = midpoint;
         double halfSpacing = spacing * 0.5;
+        double minA = -halfSpacing;
+        double maxA = halfSpacing;
 
         // Determine which axis the border is perpendicular to
         // and draw lines along the other two axes
         if (Math.abs(direction.x) > 0.1 && Math.abs(direction.y) < 0.1 && Math.abs(direction.z) < 0.1) {
             // Border normal along X axis - draw lines along Y and Z
             edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y - halfSpacing, center.z),
-                new Vec3(center.x, center.y + halfSpacing, center.z),
+                new Vec3(center.x, center.y + minA, center.z + minA),
+                new Vec3(center.x, center.y + maxA, center.z + minA),
                 primaryColor, secondaryColor, spacing));
             edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y, center.z - halfSpacing),
-                new Vec3(center.x, center.y, center.z + halfSpacing),
+                new Vec3(center.x, center.y + minA, center.z + maxA),
+                new Vec3(center.x, center.y + maxA, center.z + maxA),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x, center.y + minA, center.z + minA),
+                new Vec3(center.x, center.y + minA, center.z + maxA),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x, center.y + maxA, center.z + minA),
+                new Vec3(center.x, center.y + maxA, center.z + maxA),
                 primaryColor, secondaryColor, spacing));
         } else if (Math.abs(direction.y) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.z) < 0.1) {
             // Border normal along Y axis - draw lines along X and Z
             edges.add(new VoronoiEdge(
-                new Vec3(center.x - halfSpacing, center.y, center.z),
-                new Vec3(center.x + halfSpacing, center.y, center.z),
+                new Vec3(center.x + minA, center.y, center.z + minA),
+                new Vec3(center.x + maxA, center.y, center.z + minA),
                 primaryColor, secondaryColor, spacing));
             edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y, center.z - halfSpacing),
-                new Vec3(center.x, center.y, center.z + halfSpacing),
+                new Vec3(center.x + minA, center.y, center.z + maxA),
+                new Vec3(center.x + maxA, center.y, center.z + maxA),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x + minA, center.y, center.z + minA),
+                new Vec3(center.x + minA, center.y, center.z + maxA),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x + maxA, center.y, center.z + minA),
+                new Vec3(center.x + maxA, center.y, center.z + maxA),
                 primaryColor, secondaryColor, spacing));
         } else if (Math.abs(direction.z) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.y) < 0.1) {
             // Border normal along Z axis - draw lines along X and Y
             edges.add(new VoronoiEdge(
-                new Vec3(center.x - halfSpacing, center.y, center.z),
-                new Vec3(center.x + halfSpacing, center.y, center.z),
+                new Vec3(center.x + minA, center.y + minA, center.z),
+                new Vec3(center.x + maxA, center.y + minA, center.z),
                 primaryColor, secondaryColor, spacing));
             edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y - halfSpacing, center.z),
-                new Vec3(center.x, center.y + halfSpacing, center.z),
+                new Vec3(center.x + minA, center.y + maxA, center.z),
+                new Vec3(center.x + maxA, center.y + maxA, center.z),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x + minA, center.y + minA, center.z),
+                new Vec3(center.x + minA, center.y + maxA, center.z),
+                primaryColor, secondaryColor, spacing));
+            edges.add(new VoronoiEdge(
+                new Vec3(center.x + maxA, center.y + minA, center.z),
+                new Vec3(center.x + maxA, center.y + maxA, center.z),
                 primaryColor, secondaryColor, spacing));
         }
     }
@@ -589,8 +615,12 @@ public class VoronoiCalculator {
         if (lastRequestedPlayerPos == null) {
             return true;
         }
-        return camPos.distanceTo(lastRequestedPlayerPos) > RECALC_DISTANCE_THRESHOLD
+        return camPos.distanceTo(lastRequestedPlayerPos) > getRecalcDistanceThreshold()
             || PortalManager.getInstance().hasPortalsChanged();
+    }
+
+    private static double getRecalcDistanceThreshold() {
+        return PortalManager.getInstance().getBorderFuzzStartDistance() * 0.5;
     }
 
     private void queueRecalc(RecalcRequest request) {
