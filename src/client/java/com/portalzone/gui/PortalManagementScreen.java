@@ -9,6 +9,7 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -155,6 +156,18 @@ public class PortalManagementScreen extends Screen {
             .bounds(360, 10, 100, 20)
             .build());
 
+        this.addRenderableWidget(Button.builder(
+                Component.literal("Add Simulated"),
+                button -> {
+                    if (minecraft != null && minecraft.player != null && minecraft.level != null) {
+                        BlockPos pos = minecraft.player.blockPosition();
+                        manager.addSimulatedPortal(minecraft.level.dimension(), pos);
+                        loadPortals();
+                    }
+                })
+            .bounds(250, 35, 210, 20)
+            .build());
+
         // Load portals
         loadPortals();
     }
@@ -213,10 +226,33 @@ public class PortalManagementScreen extends Screen {
                 manager.setPortalName(portalEntry.portal.uuid, text);
             });
             this.addRenderableWidget(portalEntry.editBox);
-            float hue = manager.getPortalHue(portalEntry.portal);
-            portalEntry.hueSlider = new HueSlider(this.width / 2 + 50, y + SLIDER_OFFSET_Y, 200, 20,
-                portalEntry.portal.uuid, hue);
-            this.addRenderableWidget(portalEntry.hueSlider);
+            if (!portalEntry.portal.isSimulated()) {
+                float hue = manager.getPortalHue(portalEntry.portal);
+                portalEntry.hueSlider = new HueSlider(this.width / 2 + 50, y + SLIDER_OFFSET_Y, 200, 20,
+                    portalEntry.portal.uuid, hue);
+                this.addRenderableWidget(portalEntry.hueSlider);
+            }
+            portalEntry.hideButton = Button.builder(
+                    Component.literal(manager.isPortalHidden(portalEntry.portal) ? "Show" : "Hide"),
+                    button -> {
+                        boolean hidden = !manager.isPortalHidden(portalEntry.portal);
+                        manager.setPortalHidden(portalEntry.portal.uuid, hidden);
+                        button.setMessage(Component.literal(hidden ? "Show" : "Hide"));
+                    })
+                .bounds(this.width / 2 + 255, y, 45, 20)
+                .build();
+            this.addRenderableWidget(portalEntry.hideButton);
+            if (portalEntry.portal.isSimulated()) {
+                portalEntry.removeButton = Button.builder(
+                        Component.literal("-"),
+                        button -> {
+                            manager.removeSimulatedPortal(portalEntry.portal.uuid);
+                            loadPortals();
+                        })
+                    .bounds(this.width / 2 + 305, y, 18, 20)
+                    .build();
+                this.addRenderableWidget(portalEntry.removeButton);
+            }
             y += entry.height;
         }
     }
@@ -256,6 +292,14 @@ public class PortalManagementScreen extends Screen {
         if (entry.hueSlider != null) {
             entry.hueSlider.setY(y + SLIDER_OFFSET_Y);
         }
+        if (entry.removeButton != null) {
+            entry.removeButton.setX(this.width / 2 + 305);
+            entry.removeButton.setY(y);
+        }
+        if (entry.hideButton != null) {
+            entry.hideButton.setX(this.width / 2 + 255);
+            entry.hideButton.setY(y);
+        }
 
         // Draw color indicator
         Vector3f color = PortalManager.getInstance().getPortalColor(entry.portal);
@@ -271,7 +315,9 @@ public class PortalManagementScreen extends Screen {
         graphics.drawString(this.font, idText, this.width / 2 - 170, y + 6, 0xFFFFFF);
 
         // Draw dimension info
-        String dimText = entry.isCurrentDimension ? "(Current)" : "(Other)";
+        String dimText = entry.portal.isSimulated()
+            ? "(Simulated)"
+            : (entry.isCurrentDimension ? "(Current)" : "(Other)");
         graphics.drawString(this.font, dimText, this.width / 2 - 120, y + 6, 0xAAAAAA);
 
         // Draw position
@@ -311,6 +357,8 @@ public class PortalManagementScreen extends Screen {
         final boolean isCurrentDimension;
         EditBox editBox;
         HueSlider hueSlider;
+        Button hideButton;
+        Button removeButton;
 
         PortalEntry(PortalInfo portal, ResourceKey<Level> dimension, boolean isCurrentDimension) {
             this.portal = portal;

@@ -42,6 +42,9 @@ public class PortalManager {
     // Store persisted portals (loaded from config and saved across sessions)
     private final Map<ResourceKey<Level>, Map<UUID, PortalInfo>> persistedPortals = new ConcurrentHashMap<>();
 
+    // Store simulated portals (manual entries, persisted across sessions)
+    private final Map<ResourceKey<Level>, Map<UUID, PortalInfo>> simulatedPortals = new ConcurrentHashMap<>();
+
     // Track which chunks have been scanned
     private final Map<ResourceKey<Level>, Map<ChunkPos, Long>> scannedChunks = new ConcurrentHashMap<>();
 
@@ -55,6 +58,14 @@ public class PortalManager {
 
     // Store custom hues for portals (persistent across rescans)
     private final Map<UUID, Float> portalHues = new ConcurrentHashMap<>();
+
+    // Store hidden portals (excluded from border calculations)
+    private final Set<UUID> hiddenPortals = ConcurrentHashMap.newKeySet();
+
+    private static final Vector3f SIMULATED_PORTAL_COLOR = new Vector3f(1.0f, 1.0f, 1.0f);
+
+    private boolean flipBordersHeld = false;
+    private boolean simulatePortalHeld = false;
 
     // Depth testing settings
     private boolean portalMarkersAlwaysVisible = true; // Default: always visible
@@ -489,6 +500,12 @@ public class PortalManager {
             }
         }
 
+        // Add simulated portals
+        Map<UUID, PortalInfo> dimensionSimulatedPortals = simulatedPortals.get(dimension);
+        if (dimensionSimulatedPortals != null) {
+            result.addAll(dimensionSimulatedPortals.values());
+        }
+
         return result;
     }
 
@@ -523,9 +540,11 @@ public class PortalManager {
     public void clear() {
         portalsByDimension.clear();
         persistedPortals.clear();
+        simulatedPortals.clear();
         scannedChunks.clear();
         portalNames.clear();
         portalHues.clear();
+        hiddenPortals.clear();
         portalsChanged = true;
     }
 
@@ -559,6 +578,9 @@ public class PortalManager {
      * Set a custom hue for a portal
      */
     public void setPortalHue(UUID portalUuid, float hue) {
+        if (isSimulatedPortal(portalUuid)) {
+            return;
+        }
         float clamped = Math.max(0.0f, Math.min(360.0f, hue));
         portalHues.put(portalUuid, clamped);
         portalsChanged = true;
@@ -568,6 +590,9 @@ public class PortalManager {
      * Get the hue for a portal (custom hue if set, otherwise default)
      */
     public float getPortalHue(PortalInfo portal) {
+        if (portal.isSimulated()) {
+            return 0.0f;
+        }
         Float custom = portalHues.get(portal.uuid);
         return custom != null ? custom : portal.getBaseHue();
     }
@@ -576,7 +601,23 @@ public class PortalManager {
      * Get the color for a portal (custom hue if set, otherwise default)
      */
     public Vector3f getPortalColor(PortalInfo portal) {
+        if (portal.isSimulated()) {
+            return SIMULATED_PORTAL_COLOR;
+        }
         return PortalInfo.colorFromHue(getPortalHue(portal));
+    }
+
+    public boolean isPortalHidden(PortalInfo portal) {
+        return hiddenPortals.contains(portal.uuid);
+    }
+
+    public void setPortalHidden(UUID portalUuid, boolean hidden) {
+        if (hidden) {
+            hiddenPortals.add(portalUuid);
+        } else {
+            hiddenPortals.remove(portalUuid);
+        }
+        portalsChanged = true;
     }
 
     /**
@@ -721,11 +762,23 @@ public class PortalManager {
      * Clear all portals in the current dimension (removes from live and persisted)
      */
     public void clearCurrentDimension(ResourceKey<Level> dimension) {
+        Set<PortalInfo> portalsInDimension = getPortalsInDimension(dimension);
+        if (!portalsInDimension.isEmpty()) {
+            Set<UUID> toRemove = new HashSet<>();
+            for (PortalInfo portal : portalsInDimension) {
+                toRemove.add(portal.uuid);
+            }
+            hiddenPortals.removeAll(toRemove);
+        }
+
         // Clear live portals
         portalsByDimension.remove(dimension);
 
         // Clear persisted portals
         persistedPortals.remove(dimension);
+
+        // Clear simulated portals
+        simulatedPortals.remove(dimension);
 
         // Clear scanned chunks
         scannedChunks.remove(dimension);
@@ -740,7 +793,9 @@ public class PortalManager {
     public void clearAllPortals() {
         portalsByDimension.clear();
         persistedPortals.clear();
+        simulatedPortals.clear();
         scannedChunks.clear();
+        hiddenPortals.clear();
         portalsChanged = true;
         saveSettingsNow();
     }
@@ -763,6 +818,15 @@ public class PortalManager {
             if (hues != null) {
                 for (Map.Entry<String, JsonElement> entry : hues.entrySet()) {
                     portalHues.put(UUID.fromString(entry.getKey()), entry.getValue().getAsFloat());
+                }
+            }
+
+            JsonObject hidden = root.getAsJsonObject("hiddenPortals");
+            if (hidden != null) {
+                for (Map.Entry<String, JsonElement> entry : hidden.entrySet()) {
+                    if (entry.getValue().getAsBoolean()) {
+                        hiddenPortals.add(UUID.fromString(entry.getKey()));
+                    }
                 }
             }
 
@@ -825,6 +889,35 @@ public class PortalManager {
                     }
                 }
             }
+
+            // Load simulated portals
+            JsonObject simulatedJson = root.getAsJsonObject("simulatedPortals");
+            if (simulatedJson != null) {
+                for (Map.Entry<String, JsonElement> dimensionEntry : simulatedJson.entrySet()) {
+                    try {
+                        ResourceLocation dimLocation = ResourceLocation.parse(dimensionEntry.getKey());
+                        ResourceKey<Level> dimension = ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, dimLocation);
+
+                        JsonObject dimensionPortals = dimensionEntry.getValue().getAsJsonObject();
+                        Map<UUID, PortalInfo> portalMap = new ConcurrentHashMap<>();
+
+                        for (Map.Entry<String, JsonElement> portalEntry : dimensionPortals.entrySet()) {
+                            try {
+                                UUID portalUuid = UUID.fromString(portalEntry.getKey());
+                                JsonObject portalJson = portalEntry.getValue().getAsJsonObject();
+                                PortalInfo portal = PortalInfo.fromJson(portalJson);
+                                portalMap.put(portalUuid, portal);
+                            } catch (Exception e) {
+                                System.err.println("[PortalZoneVisualizer] Failed to load simulated portal " + portalEntry.getKey() + ": " + e.getMessage());
+                            }
+                        }
+
+                        simulatedPortals.put(dimension, portalMap);
+                    } catch (Exception e) {
+                        System.err.println("[PortalZoneVisualizer] Failed to load simulated portals for dimension " + dimensionEntry.getKey() + ": " + e.getMessage());
+                    }
+                }
+            }
         } catch (Exception e) {
             System.err.println("[PortalZoneVisualizer] Failed to load settings: " + e.getMessage());
         }
@@ -843,6 +936,12 @@ public class PortalManager {
             hues.addProperty(entry.getKey().toString(), entry.getValue());
         }
         root.add("portalHues", hues);
+
+        JsonObject hidden = new JsonObject();
+        for (UUID portalUuid : hiddenPortals) {
+            hidden.addProperty(portalUuid.toString(), true);
+        }
+        root.add("hiddenPortals", hidden);
 
         // Save depth testing settings
         root.addProperty("portalMarkersAlwaysVisible", portalMarkersAlwaysVisible);
@@ -874,6 +973,23 @@ public class PortalManager {
         }
         root.add("portals", portalsJson);
 
+        // Save simulated portals
+        JsonObject simulatedJson = new JsonObject();
+        for (Map.Entry<ResourceKey<Level>, Map<UUID, PortalInfo>> dimensionEntry : simulatedPortals.entrySet()) {
+            ResourceKey<Level> dimension = dimensionEntry.getKey();
+            Map<UUID, PortalInfo> dimensionPortals = dimensionEntry.getValue();
+
+            JsonObject dimensionJson = new JsonObject();
+            for (Map.Entry<UUID, PortalInfo> portalEntry : dimensionPortals.entrySet()) {
+                UUID portalUuid = portalEntry.getKey();
+                PortalInfo portal = portalEntry.getValue();
+                dimensionJson.add(portalUuid.toString(), portal.toJson());
+            }
+
+            simulatedJson.add(dimension.location().toString(), dimensionJson);
+        }
+        root.add("simulatedPortals", simulatedJson);
+
         try {
             Files.createDirectories(configPath.getParent());
             try (var writer = Files.newBufferedWriter(configPath, StandardCharsets.UTF_8)) {
@@ -902,5 +1018,61 @@ public class PortalManager {
             });
             portalsChanged = true;
         }
+    }
+
+    public void addSimulatedPortal(ResourceKey<Level> dimension, BlockPos position) {
+        Map<UUID, PortalInfo> portals = simulatedPortals.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
+        PortalInfo portal = PortalInfo.createSimulated(position, dimension);
+        portals.put(portal.uuid, portal);
+        portalsChanged = true;
+        saveSettingsNow();
+    }
+
+    public void removeSimulatedPortal(UUID portalUuid) {
+        boolean removed = false;
+        for (Map<UUID, PortalInfo> portals : simulatedPortals.values()) {
+            if (portals.remove(portalUuid) != null) {
+                removed = true;
+                break;
+            }
+        }
+        if (removed) {
+            portalNames.remove(portalUuid);
+            portalHues.remove(portalUuid);
+            hiddenPortals.remove(portalUuid);
+            portalsChanged = true;
+            saveSettingsNow();
+        }
+    }
+
+    private boolean isSimulatedPortal(UUID portalUuid) {
+        for (Map<UUID, PortalInfo> portals : simulatedPortals.values()) {
+            if (portals.containsKey(portalUuid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public void setFlipBordersHeld(boolean held) {
+        if (this.flipBordersHeld != held) {
+            this.flipBordersHeld = held;
+            portalsChanged = true;
+        }
+    }
+
+    public boolean isFlipBordersHeld() {
+        return flipBordersHeld;
+    }
+
+    public void setSimulatePortalHeld(boolean held) {
+        if (this.simulatePortalHeld != held) {
+            this.simulatePortalHeld = held;
+            portalsChanged = true;
+        }
+    }
+
+    public boolean isSimulatePortalHeld() {
+        return simulatePortalHeld;
     }
 }

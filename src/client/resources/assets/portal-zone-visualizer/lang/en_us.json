@@ -1,6 +1,8 @@
 {
   "key.portal-zone-visualizer.toggle": "Toggle Portal Visualization",
   "key.portal-zone-visualizer.manage": "Portal Management",
+  "key.portal-zone-visualizer.flip_borders": "Hold to Flip Border Dimension",
+  "key.portal-zone-visualizer.simulate_portal": "Hold to Simulate Portal",
   "category.portal-zone-visualizer": "Portal Zone Visualizer",
   "gui.portal-zone-visualizer.portal_list": "Portal Management",
   "gui.portal-zone-visualizer.hue": "Hue: %s"

@@ -22,6 +22,7 @@ public class PortalInfo {
     public final Vector3f color;
     private final float baseHue;
     public final Axis orientation;
+    private final boolean simulated;
 
     // Portal dimensions
     public final int width;
@@ -41,6 +42,7 @@ public class PortalInfo {
         this.orientation = orientation;
         this.width = width;
         this.height = height;
+        this.simulated = false;
 
         // Generate UUID based on position and dimension
         // This ensures the same portal always has the same UUID and color
@@ -57,7 +59,7 @@ public class PortalInfo {
      * Private constructor for deserialization
      */
     private PortalInfo(BlockPos position, ResourceKey<Level> dimension, UUID uuid, Axis orientation,
-                      int width, int height, long lastValidated, boolean isValid) {
+                      int width, int height, long lastValidated, boolean isValid, boolean simulated) {
         this.position = position;
         this.dimension = dimension;
         this.uuid = uuid;
@@ -66,6 +68,7 @@ public class PortalInfo {
         this.height = height;
         this.lastValidated = lastValidated;
         this.isValid = isValid;
+        this.simulated = simulated;
 
         this.baseHue = generateHue(uuid);
         this.color = colorFromHue(baseHue);
@@ -156,11 +159,34 @@ public class PortalInfo {
     }
 
     /**
+     * Returns true if this is a simulated portal (not backed by portal blocks).
+     */
+    public boolean isSimulated() {
+        return simulated;
+    }
+
+    /**
+     * Create a simulated portal entry.
+     */
+    public static PortalInfo createSimulated(BlockPos position, ResourceKey<Level> dimension) {
+        UUID uuid = generateSimulatedUUID(position, dimension);
+        return new PortalInfo(position, dimension, uuid, Axis.X, 2, 3, System.currentTimeMillis(), true, true);
+    }
+
+    /**
      * Generate a consistent UUID for this portal based on its position and dimension
      */
     private static UUID generateUUID(BlockPos pos, ResourceKey<Level> dimension) {
         // Use position and dimension to create a consistent UUID
         String key = dimension.location() + ":" + pos.getX() + ":" + pos.getY() + ":" + pos.getZ();
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Generate a consistent UUID for simulated portals based on position/dimension.
+     */
+    private static UUID generateSimulatedUUID(BlockPos pos, ResourceKey<Level> dimension) {
+        String key = "simulated:" + dimension.location() + ":" + pos.getX() + ":" + pos.getY() + ":" + pos.getZ();
         return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -235,6 +261,7 @@ public class PortalInfo {
         // Validation
         json.addProperty("lastValidated", lastValidated);
         json.addProperty("isValid", isValid);
+        json.addProperty("isSimulated", simulated);
 
         return json;
     }
@@ -268,8 +295,9 @@ public class PortalInfo {
         // Parse validation (with defaults for backwards compatibility)
         long lastValidated = json.has("lastValidated") ? json.get("lastValidated").getAsLong() : System.currentTimeMillis();
         boolean isValid = json.has("isValid") ? json.get("isValid").getAsBoolean() : true;
+        boolean simulated = json.has("isSimulated") ? json.get("isSimulated").getAsBoolean() : false;
 
-        return new PortalInfo(position, dimension, uuid, orientation, width, height, lastValidated, isValid);
+        return new PortalInfo(position, dimension, uuid, orientation, width, height, lastValidated, isValid, simulated);
     }
 
     @Override

@@ -23,6 +23,12 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
     // Keybinding for portal management screen
     public static KeyMapping portalManagementKey;
 
+    // Keybinding for flipping border source (momentary)
+    public static KeyMapping flipBordersKey;
+
+    // Keybinding for simulating a portal at the player position (momentary)
+    public static KeyMapping simulatePortalKey;
+
     // Rendering state
     private static boolean renderingEnabled = true;
 
@@ -37,12 +43,28 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
 
         portalManagementKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
             "key.portal-zone-visualizer.manage",
+            GLFW.GLFW_KEY_I,
+            KeyMapping.Category.MISC
+        ));
+
+        flipBordersKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
+            "key.portal-zone-visualizer.flip_borders",
             GLFW.GLFW_KEY_O,
+            KeyMapping.Category.MISC
+        ));
+
+        simulatePortalKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
+            "key.portal-zone-visualizer.simulate_portal",
+            GLFW.GLFW_KEY_U,
             KeyMapping.Category.MISC
         ));
 
         // Register tick event to update portal manager
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            PortalManager manager = PortalManager.getInstance();
+            manager.setFlipBordersHeld(flipBordersKey.isDown());
+            manager.setSimulatePortalHeld(simulatePortalKey.isDown());
+
             // Handle toggle visualization keybinding
             while (toggleVisualizationKey.consumeClick()) {
                 renderingEnabled = !renderingEnabled;
@@ -62,7 +84,7 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
 
             // Update portal manager
             if (client.level != null) {
-                PortalManager.getInstance().tick();
+                manager.tick();
             }
         });
 

@@ -32,6 +32,7 @@ public class PortalRenderer {
     private static final int FULLBRIGHT = 0x00F000F0;
     private static final float BORDER_LINE_WIDTH = 3.0f;
     private static final float MARKER_LINE_WIDTH = 8.0f;
+    private static final Vector3f HIDDEN_PORTAL_COLOR = new Vector3f(0.6f, 0.6f, 0.6f);
     private static final RenderType LINES_DEPTH = createLines(true, BORDER_LINE_WIDTH, "portal_zone_lines");
     private static final RenderType LINES_NO_DEPTH = createLines(false, BORDER_LINE_WIDTH, "portal_zone_lines_no_depth");
     private static final RenderType MARKER_LINES_DEPTH = createLines(true, MARKER_LINE_WIDTH, "portal_zone_marker_lines");
@@ -62,6 +63,9 @@ public class PortalRenderer {
         // Render portals in current dimension
         Set<PortalInfo> currentDimPortals = PortalManager.getInstance().getPortalsInDimension(currentDim);
         for (PortalInfo portal : currentDimPortals) {
+            if (portal.isSimulated()) {
+                continue;
+            }
             renderPortalMarker(matrices, bufferSource, camPos, portal, portal.getCenterPos(), currentDim,
                 camera, portalMarkersUseDepth);
         }
@@ -71,6 +75,9 @@ public class PortalRenderer {
         Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
 
         for (PortalInfo portal : otherDimPortals) {
+            if (portal.isSimulated()) {
+                continue;
+            }
             Vec3 translatedPos = portal.getTranslatedPos();
             renderPortalMarker(matrices, bufferSource, camPos, portal, translatedPos, currentDim,
                 camera, portalMarkersUseDepth);
@@ -100,7 +107,9 @@ public class PortalRenderer {
         Vec2 markerHalfSize = ensureMinimumScreenSize(distance, halfWidth, halfHeight);
 
         // Get color
-        Vector3f color = PortalManager.getInstance().getPortalColor(portal);
+        Vector3f color = manager.isPortalHidden(portal)
+            ? HIDDEN_PORTAL_COLOR
+            : manager.getPortalColor(portal);
 
         // Use world position directly (PoseStack is already camera-relative)
         Vec3 pos = worldPos;

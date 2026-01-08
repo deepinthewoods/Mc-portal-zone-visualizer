@@ -41,9 +41,13 @@ public class VoronoiCalculator {
     private final AtomicReference<ConcurrentLinkedQueue<VoronoiEdge>> cachedEdges =
         new AtomicReference<>(new ConcurrentLinkedQueue<>());
     private volatile ResourceKey<Level> cachedDimension = null;
+    private volatile ResourceKey<Level> cachedSourceDimension = null;
     private volatile Vec3 cachedPlayerPos = null;
+    private volatile boolean cachedSimulateHeld = false;
     private volatile ResourceKey<Level> lastRequestedDimension = null;
+    private volatile ResourceKey<Level> lastRequestedSourceDimension = null;
     private volatile Vec3 lastRequestedPlayerPos = null;
+    private volatile boolean lastRequestedSimulateHeld = false;
     private final Object recalcLock = new Object();
     private RecalcRequest pendingRequest = null;
     private final AtomicLong requestId = new AtomicLong();
@@ -64,26 +68,38 @@ public class VoronoiCalculator {
      * Handles both portal-colored edges and neutral-colored edges (for zones with no portal in range)
      */
     public void render(PoseStack matrices, MultiBufferSource bufferSource, Vec3 camPos, ResourceKey<Level> currentDim, Camera camera) {
+        Minecraft mc = Minecraft.getInstance();
+        Vec3 playerPos = mc.player != null ? mc.player.position() : camPos;
+        ResourceKey<Level> sourceDim = getSourceDimension(currentDim);
+        boolean simulateHeld = PortalManager.getInstance().isSimulatePortalHeld();
+
         // Recalculate if portals have changed, dimension changed, or player moved significantly
         double recalcDistanceThreshold = getRecalcDistanceThreshold();
         boolean needsRecalc = PortalManager.getInstance().hasPortalsChanged()
                            || !currentDim.equals(cachedDimension)
+                           || cachedSourceDimension == null
+                           || !sourceDim.equals(cachedSourceDimension)
                            || cachedPlayerPos == null
-                           || camPos.distanceTo(cachedPlayerPos) > recalcDistanceThreshold;
+                           || playerPos.distanceTo(cachedPlayerPos) > recalcDistanceThreshold
+                           || simulateHeld != cachedSimulateHeld;
 
         if (needsRecalc) {
-            if (shouldQueueRecalc(camPos, currentDim)) {
-                RecalcRequest request = buildRecalcRequest(camPos, currentDim);
+            if (shouldQueueRecalc(playerPos, currentDim, sourceDim, simulateHeld)) {
+                RecalcRequest request = buildRecalcRequest(playerPos, currentDim, sourceDim, simulateHeld);
                 if (request != null) {
                     queueRecalc(request);
                 } else {
                     cachedEdges.set(new ConcurrentLinkedQueue<>());
                     cachedDimension = currentDim;
-                    cachedPlayerPos = camPos;
+                    cachedSourceDimension = sourceDim;
+                    cachedPlayerPos = playerPos;
+                    cachedSimulateHeld = simulateHeld;
                 }
                 PortalManager.getInstance().clearChangedFlag();
                 lastRequestedDimension = currentDim;
-                lastRequestedPlayerPos = camPos;
+                lastRequestedSourceDimension = sourceDim;
+                lastRequestedPlayerPos = playerPos;
+                lastRequestedSimulateHeld = simulateHeld;
             }
         }
 
@@ -98,7 +114,6 @@ public class VoronoiCalculator {
         float borderFuzzThreshold = PortalManager.getInstance().getBorderFuzzThreshold();
         int fuzzStartDistance = PortalManager.getInstance().getBorderFuzzStartDistance();
 
-        Minecraft mc = Minecraft.getInstance();
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
         boolean usePrimaryColor = ((gameTime / 5L) % 2L) == 0L;
 
@@ -281,9 +296,13 @@ public class VoronoiCalculator {
     public void clear() {
         cachedEdges.set(new ConcurrentLinkedQueue<>());
         cachedDimension = null;
+        cachedSourceDimension = null;
         cachedPlayerPos = null;
+        cachedSimulateHeld = false;
         lastRequestedDimension = null;
+        lastRequestedSourceDimension = null;
         lastRequestedPlayerPos = null;
+        lastRequestedSimulateHeld = false;
     }
 
     /**
@@ -608,18 +627,28 @@ public class VoronoiCalculator {
         return (int) Math.round(value * 16.0);
     }
 
-    private boolean shouldQueueRecalc(Vec3 camPos, ResourceKey<Level> currentDim) {
+    private boolean shouldQueueRecalc(Vec3 playerPos, ResourceKey<Level> currentDim,
+                                      ResourceKey<Level> sourceDim, boolean simulateHeld) {
         if (lastRequestedDimension == null || !currentDim.equals(lastRequestedDimension)) {
+            return true;
+        }
+        if (lastRequestedSourceDimension == null || !sourceDim.equals(lastRequestedSourceDimension)) {
+            return true;
+        }
+        if (lastRequestedSimulateHeld != simulateHeld) {
             return true;
         }
         if (lastRequestedPlayerPos == null) {
             return true;
         }
-        return camPos.distanceTo(lastRequestedPlayerPos) > getRecalcDistanceThreshold()
+        return playerPos.distanceTo(lastRequestedPlayerPos) > getRecalcDistanceThreshold()
             || PortalManager.getInstance().hasPortalsChanged();
     }
 
     private static double getRecalcDistanceThreshold() {
+        if (PortalManager.getInstance().isSimulatePortalHeld()) {
+            return 1.0;
+        }
         return PortalManager.getInstance().getBorderFuzzStartDistance() * 0.5;
     }
 
@@ -631,35 +660,56 @@ public class VoronoiCalculator {
         }
     }
 
-    private RecalcRequest buildRecalcRequest(Vec3 playerPos, ResourceKey<Level> currentDim) {
-        // Get portals from the OTHER dimension (the ones we would link to)
-        ResourceKey<Level> otherDim = Level.NETHER.equals(currentDim) ? Level.OVERWORLD : Level.NETHER;
-        Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
-        if (otherDimPortals.size() < 2) {
+    private static ResourceKey<Level> getSourceDimension(ResourceKey<Level> currentDim) {
+        if (PortalManager.getInstance().isFlipBordersHeld()) {
+            return currentDim;
+        }
+        return Level.NETHER.equals(currentDim) ? Level.OVERWORLD : Level.NETHER;
+    }
+
+    private RecalcRequest buildRecalcRequest(Vec3 playerPos, ResourceKey<Level> currentDim,
+                                            ResourceKey<Level> sourceDim, boolean simulateHeld) {
+        PortalManager portalManager = PortalManager.getInstance();
+        Set<PortalInfo> sourcePortals = portalManager.getPortalsInDimension(sourceDim);
+        List<PortalInfo> visiblePortals = new ArrayList<>();
+        for (PortalInfo portal : sourcePortals) {
+            if (!portalManager.isPortalHidden(portal)) {
+                visiblePortals.add(portal);
+            }
+        }
+
+        int extraPortals = simulateHeld ? 1 : 0;
+        if (visiblePortals.size() + extraPortals < 2) {
             return null;
         }
 
-        boolean showNeutralBorders = PortalManager.getInstance().isNeutralBordersEnabled();
-        boolean showVerticalBorders = PortalManager.getInstance().isVerticalBordersEnabled();
-        boolean useLinkingAlgorithm = true;
+        boolean showNeutralBorders = portalManager.isNeutralBordersEnabled();
+        boolean showVerticalBorders = portalManager.isVerticalBordersEnabled();
+        boolean useLinkingAlgorithm = !sourceDim.equals(currentDim);
 
-        int count = otherDimPortals.size();
+        int count = visiblePortals.size() + extraPortals;
         Vec3[] centers = new Vec3[count];
         Vec3[] translated = new Vec3[count];
         Vector3f[] colors = new Vector3f[count];
         int i = 0;
-        for (PortalInfo portal : otherDimPortals) {
-            // Use translated positions - these are in the current dimension's coordinate space
-            centers[i] = portal.getTranslatedPos();
-            translated[i] = portal.getTranslatedPos();
-            Vector3f color = PortalManager.getInstance().getPortalColor(portal);
+        for (PortalInfo portal : visiblePortals) {
+            Vec3 pos = sourceDim.equals(currentDim) ? portal.getCenterPos() : portal.getTranslatedPos();
+            centers[i] = pos;
+            translated[i] = pos;
+            Vector3f color = portalManager.getPortalColor(portal);
             colors[i] = new Vector3f(color);
             i++;
         }
 
+        if (simulateHeld) {
+            centers[i] = playerPos;
+            translated[i] = playerPos;
+            colors[i] = new Vector3f(1.0f, 1.0f, 1.0f);
+        }
+
         long id = requestId.incrementAndGet();
-        return new RecalcRequest(id, playerPos, currentDim, centers, translated, colors,
-            showNeutralBorders, showVerticalBorders, useLinkingAlgorithm);
+        return new RecalcRequest(id, playerPos, currentDim, sourceDim, simulateHeld,
+            centers, translated, colors, showNeutralBorders, showVerticalBorders, useLinkingAlgorithm);
     }
 
     private void recalcLoop() {
@@ -681,12 +731,16 @@ public class VoronoiCalculator {
             ConcurrentLinkedQueue<VoronoiEdge> edgesQueue = new ConcurrentLinkedQueue<>();
             cachedEdges.set(edgesQueue);
             cachedDimension = request.currentDim;
+            cachedSourceDimension = request.sourceDim;
             cachedPlayerPos = request.playerPos;
+            cachedSimulateHeld = request.simulateHeld;
             if (!recalculateVoronoi(request, edgesQueue)) {
                 continue;
             }
             cachedDimension = request.currentDim;
+            cachedSourceDimension = request.sourceDim;
             cachedPlayerPos = request.playerPos;
+            cachedSimulateHeld = request.simulateHeld;
         }
     }
 
@@ -694,6 +748,8 @@ public class VoronoiCalculator {
         final long id;
         final Vec3 playerPos;
         final ResourceKey<Level> currentDim;
+        final ResourceKey<Level> sourceDim;
+        final boolean simulateHeld;
         final Vec3[] portalCenters;
         final Vec3[] portalTranslated;
         final Vector3f[] portalColors;
@@ -702,11 +758,14 @@ public class VoronoiCalculator {
         final boolean useLinkingAlgorithm;
 
         RecalcRequest(long id, Vec3 playerPos, ResourceKey<Level> currentDim,
+                      ResourceKey<Level> sourceDim, boolean simulateHeld,
                       Vec3[] portalCenters, Vec3[] portalTranslated, Vector3f[] portalColors,
                       boolean showNeutralBorders, boolean showVerticalBorders, boolean useLinkingAlgorithm) {
             this.id = id;
             this.playerPos = playerPos;
             this.currentDim = currentDim;
+            this.sourceDim = sourceDim;
+            this.simulateHeld = simulateHeld;
             this.portalCenters = portalCenters;
             this.portalTranslated = portalTranslated;
             this.portalColors = portalColors;
