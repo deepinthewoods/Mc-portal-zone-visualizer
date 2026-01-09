@@ -132,19 +132,26 @@ public class PortalManagementScreen extends BaseScreen {
             (val) -> manager.setMinimumMarkerScreenPercent((float) val),
             "Min Portal Marker Size (%)", 0.0, 20.0, 1);
 
-        // Border fuzz threshold
+        // Close line skip
         y += 35;
         this.createDoubleField(x, y,
-            () -> manager.getBorderFuzzThreshold() * 100.0,
-            (val) -> manager.setBorderFuzzThreshold((float) (val / 100.0)),
-            "Border Fuzz Threshold (%)", 0.0, 100.0, 1);
+            () -> manager.getCloseLineSkip() * 100.0,
+            (val) -> manager.setCloseLineSkip((float) (val / 100.0)),
+            "Close Line Skip (%)", 0.0, 100.0, 1);
 
-        // Border fuzz start distance
+        // Far line skip
+        y += 35;
+        this.createDoubleField(x, y,
+            () -> manager.getFarLineSkip() * 100.0,
+            (val) -> manager.setFarLineSkip((float) (val / 100.0)),
+            "Far Line Skip (%)", 0.0, 100.0, 1);
+
+        // LOD 0 distance
         y += 35;
         this.createIntField(x, y,
-            manager::getBorderFuzzStartDistance,
-            manager::setBorderFuzzStartDistance,
-            "Border Fuzz Start Distance", 4, 256);
+            manager::getLod0Distance,
+            manager::setLod0Distance,
+            "LOD 0 Distance", 4, 256);
 
         // Portal marker draw distance
         int rightX = x + 250;
@@ -227,7 +234,8 @@ public class PortalManagementScreen extends BaseScreen {
                 if (!Double.isFinite(current)) {
                     throw new NumberFormatException("Non-finite input");
                 }
-                double delta = (mouseButton == 1) ? -step : step;
+                double delta = step * getClickStepMultiplier();
+                delta = (mouseButton == 1) ? -delta : delta;
                 double next = Math.max(min, Math.min(max, current + delta));
                 consumer.accept(next);
                 textField.setTextWrapper(String.valueOf(next));
@@ -271,7 +279,8 @@ public class PortalManagementScreen extends BaseScreen {
         this.addButton(button, (btn, mouseButton) -> {
             try {
                 int current = Integer.parseInt(textField.getTextWrapper());
-                int delta = (mouseButton == 1) ? -1 : 1;
+                int delta = getClickStepMultiplier();
+                delta = (mouseButton == 1) ? -delta : delta;
                 int next = Math.max(min, Math.min(max, current + delta));
                 consumer.accept(next);
                 textField.setTextWrapper(String.valueOf(next));
@@ -655,7 +664,8 @@ public class PortalManagementScreen extends BaseScreen {
         this.addButton(button, (btn, mouseButton) -> {
             try {
                 int current = Integer.parseInt(textField.getTextWrapper());
-                int delta = (mouseButton == 1) ? -1 : 1;
+                int delta = getClickStepMultiplier();
+                delta = (mouseButton == 1) ? -delta : delta;
                 int next = current + delta;
                 consumer.accept(next);
                 textField.setTextWrapper(String.valueOf(next));
@@ -666,6 +676,20 @@ public class PortalManagementScreen extends BaseScreen {
             }
         });
         entry.coordButtons.add(button);
+    }
+
+    private int getClickStepMultiplier() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.hasControlDown() && mc.hasShiftDown()) {
+            return 100;
+        }
+        if (mc.hasControlDown()) {
+            return 50;
+        }
+        if (mc.hasShiftDown()) {
+            return 10;
+        }
+        return 1;
     }
 
     private void updatePortalPosition(PortalEntry entry, int x, int y, int z) {

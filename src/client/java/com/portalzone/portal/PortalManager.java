@@ -73,8 +73,9 @@ public class PortalManager {
     private boolean showNeutralBorders = true; // Default: show grey borders
     private boolean showVerticalBorders = false; // Default: no vertical border lines
     private float minimumMarkerScreenPercent = 2.0f; // Default: 2% of long screen side
-    private float borderFuzzThreshold = 0.0f; // Default: no fuzz
-    private int borderFuzzStartDistance = 64; // Default: start fading at 64 blocks
+    private float closeLineSkip = 0.0f; // Default: no skip near LOD 0 boundary
+    private float farLineSkip = 0.0f; // Default: no skip at max distance
+    private int lod0Distance = 64; // Default: LOD 0 radius in blocks
 
     // Draw distance settings
     private static final double INFINITE_DRAW_DISTANCE = -1.0; // Special value for infinite distance
@@ -721,48 +722,74 @@ public class PortalManager {
     }
 
     /**
-     * Set the maximum border fuzz discard probability (0-1).
+     * Set the line skip chance near the LOD 0 boundary (0-1).
      */
-    public void setBorderFuzzThreshold(float threshold) {
-        if (!Float.isFinite(threshold)) {
-            if (this.borderFuzzThreshold != 0.0f) {
-                this.borderFuzzThreshold = 0.0f;
+    public void setCloseLineSkip(float skipChance) {
+        if (!Float.isFinite(skipChance)) {
+            if (this.closeLineSkip != 0.0f) {
+                this.closeLineSkip = 0.0f;
                 saveSettingsNow();
             }
             return;
         }
-        float clamped = Math.max(0.0f, Math.min(1.0f, threshold));
-        if (Float.compare(this.borderFuzzThreshold, clamped) == 0) {
+        float clamped = Math.max(0.0f, Math.min(1.0f, skipChance));
+        if (Float.compare(this.closeLineSkip, clamped) == 0) {
             return;
         }
-        this.borderFuzzThreshold = clamped;
+        this.closeLineSkip = clamped;
         saveSettingsNow();
     }
 
     /**
-     * Get the maximum border fuzz discard probability (0-1).
+     * Get the line skip chance near the LOD 0 boundary (0-1).
      */
-    public float getBorderFuzzThreshold() {
-        return borderFuzzThreshold;
+    public float getCloseLineSkip() {
+        return closeLineSkip;
     }
 
     /**
-     * Set the distance (blocks) where border fuzz begins.
+     * Set the line skip chance at the far draw distance (0-1).
      */
-    public void setBorderFuzzStartDistance(int distance) {
+    public void setFarLineSkip(float skipChance) {
+        if (!Float.isFinite(skipChance)) {
+            if (this.farLineSkip != 0.0f) {
+                this.farLineSkip = 0.0f;
+                saveSettingsNow();
+            }
+            return;
+        }
+        float clamped = Math.max(0.0f, Math.min(1.0f, skipChance));
+        if (Float.compare(this.farLineSkip, clamped) == 0) {
+            return;
+        }
+        this.farLineSkip = clamped;
+        saveSettingsNow();
+    }
+
+    /**
+     * Get the line skip chance at the far draw distance (0-1).
+     */
+    public float getFarLineSkip() {
+        return farLineSkip;
+    }
+
+    /**
+     * Set the distance (blocks) where LOD 0 ends.
+     */
+    public void setLod0Distance(int distance) {
         int clamped = Math.max(4, Math.min(256, distance));
-        if (this.borderFuzzStartDistance == clamped) {
+        if (this.lod0Distance == clamped) {
             return;
         }
-        this.borderFuzzStartDistance = clamped;
+        this.lod0Distance = clamped;
         saveSettingsNow();
     }
 
     /**
-     * Get the distance (blocks) where border fuzz begins.
+     * Get the distance (blocks) where LOD 0 ends.
      */
-    public int getBorderFuzzStartDistance() {
-        return borderFuzzStartDistance;
+    public int getLod0Distance() {
+        return lod0Distance;
     }
 
     /**
@@ -899,11 +926,29 @@ public class PortalManager {
             if (root.has("minimumMarkerScreenPercent")) {
                 setMinimumMarkerScreenPercent(root.get("minimumMarkerScreenPercent").getAsFloat());
             }
-            if (root.has("borderFuzzThreshold")) {
-                setBorderFuzzThreshold(root.get("borderFuzzThreshold").getAsFloat());
+            boolean hasCloseSkip = false;
+            boolean hasFarSkip = false;
+            if (root.has("closeLineSkip")) {
+                setCloseLineSkip(root.get("closeLineSkip").getAsFloat());
+                hasCloseSkip = true;
             }
-            if (root.has("borderFuzzStartDistance")) {
-                setBorderFuzzStartDistance(root.get("borderFuzzStartDistance").getAsInt());
+            if (root.has("farLineSkip")) {
+                setFarLineSkip(root.get("farLineSkip").getAsFloat());
+                hasFarSkip = true;
+            }
+            if (root.has("borderFuzzThreshold")) {
+                float legacyThreshold = root.get("borderFuzzThreshold").getAsFloat();
+                if (!hasCloseSkip) {
+                    setCloseLineSkip(0.0f);
+                }
+                if (!hasFarSkip) {
+                    setFarLineSkip(legacyThreshold);
+                }
+            }
+            if (root.has("lod0Distance")) {
+                setLod0Distance(root.get("lod0Distance").getAsInt());
+            } else if (root.has("borderFuzzStartDistance")) {
+                setLod0Distance(root.get("borderFuzzStartDistance").getAsInt());
             }
             if (root.has("portalMarkerDrawDistance")) {
                 setPortalMarkerDrawDistance(root.get("portalMarkerDrawDistance").getAsDouble());
@@ -1002,8 +1047,9 @@ public class PortalManager {
         root.addProperty("showNeutralBorders", showNeutralBorders);
         root.addProperty("showVerticalBorders", showVerticalBorders);
         root.addProperty("minimumMarkerScreenPercent", minimumMarkerScreenPercent);
-        root.addProperty("borderFuzzThreshold", borderFuzzThreshold);
-        root.addProperty("borderFuzzStartDistance", borderFuzzStartDistance);
+        root.addProperty("closeLineSkip", closeLineSkip);
+        root.addProperty("farLineSkip", farLineSkip);
+        root.addProperty("lod0Distance", lod0Distance);
 
         // Save draw distance settings
         root.addProperty("portalMarkerDrawDistance", portalMarkerDrawDistance);

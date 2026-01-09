@@ -111,15 +111,16 @@ public class VoronoiCalculator {
         // Render borders with depth control
         boolean bordersAlwaysVisible = PortalManager.getInstance().isBordersAlwaysVisible();
         boolean bordersUseDepth = !bordersAlwaysVisible;
-        float borderFuzzThreshold = PortalManager.getInstance().getBorderFuzzThreshold();
-        int fuzzStartDistance = PortalManager.getInstance().getBorderFuzzStartDistance();
+        float closeLineSkip = PortalManager.getInstance().getCloseLineSkip();
+        float farLineSkip = PortalManager.getInstance().getFarLineSkip();
+        int lod0Distance = PortalManager.getInstance().getLod0Distance();
 
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
         boolean usePrimaryColor = ((gameTime / 5L) % 2L) == 0L;
 
         // Render cached edges with world coordinates (PoseStack is already camera-relative)
         for (VoronoiEdge edge : cachedEdges.get()) {
-            if (!shouldRenderEdge(edge, camPos, borderFuzzThreshold, fuzzStartDistance)) {
+            if (!shouldRenderEdge(edge, camPos, closeLineSkip, farLineSkip, lod0Distance)) {
                 continue;
             }
             Vector3f color = usePrimaryColor ? edge.primaryColor : edge.secondaryColor;
@@ -167,7 +168,7 @@ public class VoronoiCalculator {
             return true;
         }
 
-        int[] lodRadii = buildLodRadii(PortalManager.getInstance().getBorderFuzzStartDistance());
+        int[] lodRadii = buildLodRadii(PortalManager.getInstance().getLod0Distance());
 
         // Calculate dynamic max distance based on portal locations
         int maxDistance = calculateMaxDistance(request.portalTranslated, request.playerPos);
@@ -549,7 +550,8 @@ public class VoronoiCalculator {
     }
 
 
-    private static boolean shouldRenderEdge(VoronoiEdge edge, Vec3 camPos, float fuzzThreshold, int fuzzStartDistance) {
+    private static boolean shouldRenderEdge(VoronoiEdge edge, Vec3 camPos, float closeLineSkip,
+                                            float farLineSkip, int lod0Distance) {
         // LOD 0 (spacing == 1) always renders every line with 0% drop
         if (edge.alwaysRender) {
             return true;
@@ -570,41 +572,38 @@ public class VoronoiCalculator {
             return false;
         }
 
-        // If threshold is 0, always render all lines
-        if (fuzzThreshold <= 0.0f) {
+        // If both skip chances are 0, always render all lines
+        if (closeLineSkip <= 0.0f && farLineSkip <= 0.0f) {
             return true;
         }
 
         // Calculate actual distance from camera
         double distance = Math.sqrt(distSq);
-        double lod0Radius = Math.max(0.0, fuzzStartDistance);
+        double lod0Radius = Math.max(0.0, lod0Distance);
 
-        // Within LOD 0 radius, always render (0% drop)
+        float dropChance;
         if (distance <= lod0Radius) {
-            return true;
-        }
+            dropChance = closeLineSkip;
+        } else {
+            // Fade between close and far skip chances beyond the LOD 0 boundary.
+            double distanceBeyondLod0 = distance - lod0Radius;
+            double fadeRange = maxBorderDistance - lod0Radius;
 
-        // Beyond LOD 0, drop chance increases linearly with distance from LOD 0 boundary
-        // Fade range extends from LOD 0 boundary to max border distance
-        double distanceBeyondLod0 = distance - lod0Radius;
-        double fadeRange = maxBorderDistance - lod0Radius;
+            if (fadeRange <= 0.0) {
+                fadeRange = 1.0; // Avoid division by zero
+            }
 
-        if (fadeRange <= 0.0) {
-            fadeRange = 1.0; // Avoid division by zero
-        }
+            // Calculate interpolation factor (0 at LOD 0 boundary, 1 at max distance)
+            double t = distanceBeyondLod0 / fadeRange;
+            if (t < 0.0) {
+                t = 0.0;
+            }
+            if (t > 1.0) {
+                t = 1.0;
+            }
 
-        // Calculate interpolation factor (0 at LOD 0 boundary, 1 at max distance)
-        double t = distanceBeyondLod0 / fadeRange;
-        if (t < 0.0) {
-            t = 0.0;
+            dropChance = (float) (closeLineSkip + (farLineSkip - closeLineSkip) * t);
         }
-        if (t > 1.0) {
-            t = 1.0;
-        }
-
-        // Drop chance starts at 0% at LOD 0 boundary, increases to fuzzThreshold% at max distance
-        // The threshold slider controls the maximum drop percentage
-        float dropChance = (float) (t * fuzzThreshold);
         return fastRandom(edge) >= dropChance;
     }
 
@@ -649,7 +648,7 @@ public class VoronoiCalculator {
         if (PortalManager.getInstance().isSimulatePortalHeld()) {
             return 1.0;
         }
-        return PortalManager.getInstance().getBorderFuzzStartDistance() * 0.5;
+        return PortalManager.getInstance().getLod0Distance() * 0.25;
     }
 
     private void queueRecalc(RecalcRequest request) {
