@@ -94,7 +94,8 @@ public class PortalManager {
     public enum LineRenderPreset {
         FULL("Full"),
         MEDIUM("Medium"),
-        LOW("Low");
+        LOW("Low"),
+        PHASED("Phased");
 
         private final String displayName;
 

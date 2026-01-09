@@ -151,7 +151,7 @@ public class VoronoiCalculator {
         int[] lodRadii = buildLodRadii(lod0Distance);
 
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
-        long phase = (gameTime / 5L) % 3; // 3-phase rotation matching color alternation speed
+        long phase = (gameTime / 8L) % 4; // 4-phase rotation for line skipping (8 ticks per phase)
 
         // Find nearest portal to camera for zone detection
         int nearestPortalIndex = findNearestPortalToCamera(camPos, currentDim, sourceDim);
@@ -165,7 +165,8 @@ public class VoronoiCalculator {
 
                 // Render all segments in this bucket with the calculated color
                 for (EdgeSegment segment : bucket.segments) {
-                    if (!shouldRenderSegment(segment, camPos, group, preset, phase, lod0Distance, lodRadii)) {
+                    // Use bucket.group to ensure we're checking the bucket's actual assigned group
+                    if (!shouldRenderSegment(segment, camPos, bucket.group, preset, phase, lod0Distance, lodRadii)) {
                         continue;
                     }
 
@@ -229,7 +230,7 @@ public class VoronoiCalculator {
         boolean currentZoneIsPrimary = (nearestPortalIndex == bucket.portal1Index);
 
         // Calculate phase from game time
-        long phase = (gameTime / 5L) % 4;
+        long phase = (gameTime / 8L) % 4;
 
         // Determine which color to show based on group and phase
         boolean showPrimary;
@@ -1154,23 +1155,58 @@ public class VoronoiCalculator {
     }
 
     /**
-     * Helper method to add a line segment to the appropriate bucket for a fixed group
+     * Helper method to add a line segment to the appropriate bucket with pseudo-random group assignment
      */
     private void addSegmentToBucket(java.util.Map<BucketKey, EdgeBucket> bucketMap,
                                     double x1, double y1, double z1, double x2, double y2, double z2,
-                                    int spacing, int group, Vector3f primaryColor, Vector3f secondaryColor,
+                                    int spacing, int geometricGroup, Vector3f primaryColor, Vector3f secondaryColor,
                                     int portal1Index, int portal2Index, int lodLevel) {
         // Create segment positions
         Vec3 start = new Vec3(x1, y1, z1);
         Vec3 end = new Vec3(x2, y2, z2);
 
+        // Use hash-based pseudo-random group assignment for more organic-looking patterns
+        // This prevents visible grid patterns when render skipping occurs
+        int assignedGroup = computePseudoRandomGroup(start, end, portal1Index, portal2Index, geometricGroup);
+
         // Get or create bucket for this (group, portal_pair)
-        BucketKey key = new BucketKey(group, portal1Index, portal2Index);
+        BucketKey key = new BucketKey(assignedGroup, portal1Index, portal2Index);
         EdgeBucket bucket = bucketMap.computeIfAbsent(key,
-            k -> new EdgeBucket(primaryColor, secondaryColor, portal1Index, portal2Index, group));
+            k -> new EdgeBucket(primaryColor, secondaryColor, portal1Index, portal2Index, assignedGroup));
 
         // Add segment to bucket
         bucket.addSegment(start, end, spacing, lodLevel);
+    }
+
+    /**
+     * Compute a pseudo-random group (0-3) based on line segment coordinates and portal indices.
+     * This creates a more organic distribution of groups rather than geometric patterns.
+     */
+    private static int computePseudoRandomGroup(Vec3 start, Vec3 end, int portal1, int portal2, int geometricGroup) {
+        // Use FNV-1a hash algorithm for good distribution
+        int hash = 0x811c9dc5;
+
+        // Hash the midpoint coordinates (more stable than individual endpoints)
+        int midX = (int) start.x;
+        int midY = (int) start.y;
+        int midZ = (int) start.z;
+
+        hash = (hash ^ quantize(midX)) * 0x01000193;
+        hash = (hash ^ quantize(midY)) * 0x01000193;
+        hash = (hash ^ quantize(midZ)) * 0x01000193;
+
+        // Include portal indices to vary groups across different borders
+        hash = (hash ^ portal1) * 0x01000193;
+        hash = (hash ^ portal2) * 0x01000193;
+
+        // Include geometric group to ensure distribution across all 4 groups
+        // This prevents all lines from ending up in the same bin
+        hash = (hash ^ geometricGroup) * 0x01000193;
+
+        hash = midX * 37 + midY * 97 + midZ * 43;
+
+        // Map to group 0-3
+        return (int) (Math.random()* 4);//Math.abs(hash) % 4;
     }
 
 
@@ -1225,6 +1261,13 @@ public class VoronoiCalculator {
                 }
 
             case LOW:
+                // Render 25% of lines (1 out of 4 groups) using 3-phase rotation
+                // Phase 0: group 0
+                // Phase 1: group 1
+                // Phase 2: group 2
+                return group == (int)phase;
+
+            case PHASED:
                 // Within LOD 0: render all lines (100%)
                 if (distance <= lod0Distance) {
                     return true;
