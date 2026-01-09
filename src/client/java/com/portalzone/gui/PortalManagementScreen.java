@@ -132,22 +132,21 @@ public class PortalManagementScreen extends BaseScreen {
             (val) -> manager.setMinimumMarkerScreenPercent((float) val),
             "Min Portal Marker Size (%)", 0.0, 20.0, 1);
 
-        // Close line skip
+        // Line render preset cycle button
         y += 35;
-        this.createDoubleField(x, y,
-            () -> manager.getCloseLineSkip() * 100.0,
-            (val) -> manager.setCloseLineSkip((float) (val / 100.0)),
-            "Close Line Skip (%)", 0.0, 100.0, 1);
-
-        // Far line skip
-        y += 35;
-        this.createDoubleField(x, y,
-            () -> manager.getFarLineSkip() * 100.0,
-            (val) -> manager.setFarLineSkip((float) (val / 100.0)),
-            "Far Line Skip (%)", 0.0, 100.0, 1);
+        WidgetLabel presetLabel = new WidgetLabel(x + 12, y, 200, 10, 0xFFFFFFFF, "Line Render Detail");
+        this.addWidget(presetLabel);
+        y += 10;
+        ButtonGeneric presetButton = new ButtonGeneric(x + 12, y, 100, 20,
+            "Detail: " + manager.getLineRenderPreset().getDisplayName());
+        this.addButton(presetButton, (button, mouseButton) -> {
+            PortalManager.LineRenderPreset newPreset = manager.getLineRenderPreset().next();
+            manager.setLineRenderPreset(newPreset);
+            presetButton.setDisplayString("Detail: " + newPreset.getDisplayName());
+        });
 
         // LOD 0 distance
-        y += 35;
+        y += 25;
         this.createIntField(x, y,
             manager::getLod0Distance,
             manager::setLod0Distance,

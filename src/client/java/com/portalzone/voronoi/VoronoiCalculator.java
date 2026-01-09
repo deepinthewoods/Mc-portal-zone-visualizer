@@ -123,11 +123,11 @@ public class VoronoiCalculator {
         // Render borders with depth control
         boolean bordersAlwaysVisible = PortalManager.getInstance().isBordersAlwaysVisible();
         boolean bordersUseDepth = !bordersAlwaysVisible;
-        float closeLineSkip = PortalManager.getInstance().getCloseLineSkip();
-        float farLineSkip = PortalManager.getInstance().getFarLineSkip();
+        PortalManager.LineRenderPreset preset = PortalManager.getInstance().getLineRenderPreset();
         int lod0Distance = PortalManager.getInstance().getLod0Distance();
 
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
+        long phase = (gameTime / 5L) % 3; // 3-phase rotation matching color alternation speed
 
         // Find nearest portal to camera for zone detection
         int nearestPortalIndex = findNearestPortalToCamera(camPos, currentDim, sourceDim);
@@ -141,7 +141,7 @@ public class VoronoiCalculator {
 
                 // Render all segments in this bucket with the calculated color
                 for (EdgeSegment segment : bucket.segments) {
-                    if (!shouldRenderSegment(segment, camPos, closeLineSkip, farLineSkip, lod0Distance)) {
+                    if (!shouldRenderSegment(segment, camPos, group, preset, phase, lod0Distance)) {
                         continue;
                     }
 
@@ -713,9 +713,14 @@ public class VoronoiCalculator {
     }
 
 
-    private static boolean shouldRenderSegment(EdgeSegment segment, Vec3 camPos, float closeLineSkip,
-                                               float farLineSkip, int lod0Distance) {
-        // LOD 0 (spacing == 1) always renders every line with 0% drop
+    /**
+     * Determine if a segment should be rendered based on preset, group, phase, and distance
+     * Uses 3-phase rotation to ensure all lines are eventually rendered
+     */
+    private static boolean shouldRenderSegment(EdgeSegment segment, Vec3 camPos, int group,
+                                               PortalManager.LineRenderPreset preset, long phase,
+                                               int lod0Distance) {
+        // LOD 0 (spacing == 1) always renders every line
         if (segment.alwaysRender) {
             return true;
         }
@@ -735,43 +740,102 @@ public class VoronoiCalculator {
             return false;
         }
 
-        // If both skip chances are 0, always render all lines
-        if (closeLineSkip <= 0.0f && farLineSkip <= 0.0f) {
-            return true;
-        }
-
-        // Calculate actual distance from camera
+        // Calculate distance for LOD decisions
         double distance = Math.sqrt(distSq);
-        double lod0Radius = Math.max(0.0, lod0Distance);
 
-        float dropChance;
-        if (distance <= lod0Radius) {
-            dropChance = closeLineSkip;
-        } else {
-            // Fade between close and far skip chances beyond the LOD 0 boundary.
-            double distanceBeyondLod0 = distance - lod0Radius;
-            double fadeRange = maxBorderDistance - lod0Radius;
+        // Apply preset-based rendering logic
+        switch (preset) {
+            case FULL:
+                // Render all lines
+                return true;
 
-            if (fadeRange <= 0.0) {
-                fadeRange = 1.0; // Avoid division by zero
-            }
+            case MEDIUM:
+                // Render 50% of lines using 3-phase rotation
+                // Phase 0: groups 0,1
+                // Phase 1: groups 2,3
+                // Phase 2: groups 1,2
+                if (phase == 0) {
+                    return group == 0 || group == 1;
+                } else if (phase == 1) {
+                    return group == 2 || group == 3;
+                } else { // phase == 2
+                    return group == 1 || group == 2;
+                }
 
-            // Calculate interpolation factor (0 at LOD 0 boundary, 1 at max distance)
-            double t = distanceBeyondLod0 / fadeRange;
-            if (t < 0.0) {
-                t = 0.0;
-            }
-            if (t > 1.0) {
-                t = 1.0;
-            }
+            case LOW:
+                // Within LOD 0: render all lines (100%)
+                if (distance <= lod0Distance) {
+                    return true;
+                }
 
-            dropChance = (float) (closeLineSkip + (farLineSkip - closeLineSkip) * t);
+                // Beyond LOD 0: discrete density steps based on distance
+                // Divide the range from lod0Distance to maxBorderDistance into zones
+                double fadeRange = maxBorderDistance - lod0Distance;
+                if (fadeRange <= 0.0) {
+                    return true; // Edge case: render all if no fade range
+                }
+
+                double distanceBeyondLod0 = distance - lod0Distance;
+                double t = distanceBeyondLod0 / fadeRange;
+                t = Math.max(0.0, Math.min(1.0, t)); // Clamp to [0, 1]
+
+                // Map to density zones:
+                // 0.0 - 0.33: 75% (3 out of 4 groups)
+                // 0.33 - 0.67: 50% (2 out of 4 groups)
+                // 0.67 - 1.0: 25% (1 out of 4 groups)
+                int numGroups;
+                if (t < 0.33) {
+                    numGroups = 3; // 75%
+                } else if (t < 0.67) {
+                    numGroups = 2; // 50%
+                } else {
+                    numGroups = 1; // 25%
+                }
+
+                // Use 3-phase rotation to select which groups to render
+                return shouldRenderGroupForDensity(group, (int)phase, numGroups);
+
+            default:
+                return true;
         }
-        return fastRandom(segment) >= dropChance;
     }
 
-    private static float fastRandom(EdgeSegment segment) {
-        return (segment.hash & 0x7fffffff) / 2147483647.0f;
+    /**
+     * Determine if a group should be rendered given the phase and target number of groups
+     */
+    private static boolean shouldRenderGroupForDensity(int group, int phase, int numGroups) {
+        switch (numGroups) {
+            case 4: // 100% - all groups
+                return true;
+
+            case 3: // 75% - 3 out of 4 groups, rotating which one is excluded
+                // Phase 0: exclude group 3 (render 0,1,2)
+                // Phase 1: exclude group 0 (render 1,2,3)
+                // Phase 2: exclude group 1 (render 2,3,0)
+                int excludedGroup = (3 - phase + 3) % 4;
+                return group != excludedGroup;
+
+            case 2: // 50% - 2 out of 4 groups
+                // Phase 0: groups 0,1
+                // Phase 1: groups 2,3
+                // Phase 2: groups 1,2
+                if (phase == 0) {
+                    return group == 0 || group == 1;
+                } else if (phase == 1) {
+                    return group == 2 || group == 3;
+                } else { // phase == 2
+                    return group == 1 || group == 2;
+                }
+
+            case 1: // 25% - 1 out of 4 groups, rotating which one
+                // Phase 0: group 0
+                // Phase 1: group 1
+                // Phase 2: group 2
+                return group == phase;
+
+            default:
+                return false;
+        }
     }
 
     private static int hashEdge(Vec3 start, Vec3 end, int spacing) {

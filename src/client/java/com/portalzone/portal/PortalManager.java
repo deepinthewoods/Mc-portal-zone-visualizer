@@ -73,9 +73,31 @@ public class PortalManager {
     private boolean showNeutralBorders = true; // Default: show grey borders
     private boolean showVerticalBorders = false; // Default: no vertical border lines
     private float minimumMarkerScreenPercent = 2.0f; // Default: 2% of long screen side
-    private float closeLineSkip = 0.0f; // Default: no skip near LOD 0 boundary
-    private float farLineSkip = 0.0f; // Default: no skip at max distance
+    private LineRenderPreset lineRenderPreset = LineRenderPreset.FULL; // Default: render all lines
     private int lod0Distance = 64; // Default: LOD 0 radius in blocks
+
+    /**
+     * Line rendering presets
+     */
+    public enum LineRenderPreset {
+        FULL("Full"),
+        MEDIUM("Medium"),
+        LOW("Low");
+
+        private final String displayName;
+
+        LineRenderPreset(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
+
+        public LineRenderPreset next() {
+            return values()[(ordinal() + 1) % values().length];
+        }
+    }
 
     // Draw distance settings
     private static final double INFINITE_DRAW_DISTANCE = -1.0; // Special value for infinite distance
@@ -722,55 +744,21 @@ public class PortalManager {
     }
 
     /**
-     * Set the line skip chance near the LOD 0 boundary (0-1).
+     * Set the line render preset.
      */
-    public void setCloseLineSkip(float skipChance) {
-        if (!Float.isFinite(skipChance)) {
-            if (this.closeLineSkip != 0.0f) {
-                this.closeLineSkip = 0.0f;
-                saveSettingsNow();
-            }
+    public void setLineRenderPreset(LineRenderPreset preset) {
+        if (this.lineRenderPreset == preset) {
             return;
         }
-        float clamped = Math.max(0.0f, Math.min(1.0f, skipChance));
-        if (Float.compare(this.closeLineSkip, clamped) == 0) {
-            return;
-        }
-        this.closeLineSkip = clamped;
+        this.lineRenderPreset = preset;
         saveSettingsNow();
     }
 
     /**
-     * Get the line skip chance near the LOD 0 boundary (0-1).
+     * Get the line render preset.
      */
-    public float getCloseLineSkip() {
-        return closeLineSkip;
-    }
-
-    /**
-     * Set the line skip chance at the far draw distance (0-1).
-     */
-    public void setFarLineSkip(float skipChance) {
-        if (!Float.isFinite(skipChance)) {
-            if (this.farLineSkip != 0.0f) {
-                this.farLineSkip = 0.0f;
-                saveSettingsNow();
-            }
-            return;
-        }
-        float clamped = Math.max(0.0f, Math.min(1.0f, skipChance));
-        if (Float.compare(this.farLineSkip, clamped) == 0) {
-            return;
-        }
-        this.farLineSkip = clamped;
-        saveSettingsNow();
-    }
-
-    /**
-     * Get the line skip chance at the far draw distance (0-1).
-     */
-    public float getFarLineSkip() {
-        return farLineSkip;
+    public LineRenderPreset getLineRenderPreset() {
+        return lineRenderPreset;
     }
 
     /**
@@ -926,23 +914,27 @@ public class PortalManager {
             if (root.has("minimumMarkerScreenPercent")) {
                 setMinimumMarkerScreenPercent(root.get("minimumMarkerScreenPercent").getAsFloat());
             }
-            boolean hasCloseSkip = false;
-            boolean hasFarSkip = false;
-            if (root.has("closeLineSkip")) {
-                setCloseLineSkip(root.get("closeLineSkip").getAsFloat());
-                hasCloseSkip = true;
-            }
-            if (root.has("farLineSkip")) {
-                setFarLineSkip(root.get("farLineSkip").getAsFloat());
-                hasFarSkip = true;
-            }
-            if (root.has("borderFuzzThreshold")) {
-                float legacyThreshold = root.get("borderFuzzThreshold").getAsFloat();
-                if (!hasCloseSkip) {
-                    setCloseLineSkip(0.0f);
+            // Load line render preset (new system)
+            if (root.has("lineRenderPreset")) {
+                try {
+                    String presetName = root.get("lineRenderPreset").getAsString();
+                    lineRenderPreset = LineRenderPreset.valueOf(presetName);
+                } catch (Exception e) {
+                    lineRenderPreset = LineRenderPreset.FULL;
                 }
-                if (!hasFarSkip) {
-                    setFarLineSkip(legacyThreshold);
+            } else {
+                // Backwards compatibility: convert old skip values to presets
+                float closeSkip = root.has("closeLineSkip") ? root.get("closeLineSkip").getAsFloat() : 0.0f;
+                float farSkip = root.has("farLineSkip") ? root.get("farLineSkip").getAsFloat() : 0.0f;
+                // If using legacy borderFuzzThreshold, map it to farSkip
+                if (root.has("borderFuzzThreshold") && !root.has("farLineSkip")) {
+                    farSkip = root.get("borderFuzzThreshold").getAsFloat();
+                }
+                // Convert to preset: if both are 0, use FULL; otherwise use LOW (closest match)
+                if (closeSkip <= 0.01f && farSkip <= 0.01f) {
+                    lineRenderPreset = LineRenderPreset.FULL;
+                } else {
+                    lineRenderPreset = LineRenderPreset.LOW;
                 }
             }
             if (root.has("lod0Distance")) {
@@ -1047,8 +1039,7 @@ public class PortalManager {
         root.addProperty("showNeutralBorders", showNeutralBorders);
         root.addProperty("showVerticalBorders", showVerticalBorders);
         root.addProperty("minimumMarkerScreenPercent", minimumMarkerScreenPercent);
-        root.addProperty("closeLineSkip", closeLineSkip);
-        root.addProperty("farLineSkip", farLineSkip);
+        root.addProperty("lineRenderPreset", lineRenderPreset.name());
         root.addProperty("lod0Distance", lod0Distance);
 
         // Save draw distance settings
