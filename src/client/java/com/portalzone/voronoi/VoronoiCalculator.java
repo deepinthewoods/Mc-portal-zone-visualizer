@@ -37,9 +37,12 @@ public class VoronoiCalculator {
     // Neutral zone color (for areas with no portal in range)
     private static final Vector3f NEUTRAL_ZONE_COLOR = new Vector3f(0.8f, 0.8f, 0.8f);
     private static final int SKIP_INDEX = -2;
-    // Cached Voronoi edges
-    private final AtomicReference<ConcurrentLinkedQueue<VoronoiEdge>> cachedEdges =
-        new AtomicReference<>(new ConcurrentLinkedQueue<>());
+
+    // Cached Voronoi edges organized by group (0-3) for efficient batch rendering
+    // bucketsByGroup[group] = List of EdgeBucket for that group
+    private final AtomicReference<List<EdgeBucket>[]> cachedBuckets =
+        new AtomicReference<>(createEmptyBuckets());
+
     private volatile ResourceKey<Level> cachedDimension = null;
     private volatile ResourceKey<Level> cachedSourceDimension = null;
     private volatile Vec3 cachedPlayerPos = null;
@@ -61,6 +64,15 @@ public class VoronoiCalculator {
 
     public static VoronoiCalculator getInstance() {
         return INSTANCE;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<EdgeBucket>[] createEmptyBuckets() {
+        List<EdgeBucket>[] buckets = new List[4];
+        for (int i = 0; i < 4; i++) {
+            buckets[i] = new ArrayList<>();
+        }
+        return buckets;
     }
 
     /**
@@ -89,7 +101,7 @@ public class VoronoiCalculator {
                 if (request != null) {
                     queueRecalc(request);
                 } else {
-                    cachedEdges.set(new ConcurrentLinkedQueue<>());
+                    cachedBuckets.set(createEmptyBuckets());
                     cachedDimension = currentDim;
                     cachedSourceDimension = sourceDim;
                     cachedPlayerPos = playerPos;
@@ -116,23 +128,113 @@ public class VoronoiCalculator {
         int lod0Distance = PortalManager.getInstance().getLod0Distance();
 
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
-        boolean usePrimaryColor = ((gameTime / 5L) % 2L) == 0L;
 
-        // Render cached edges with world coordinates (PoseStack is already camera-relative)
-        for (VoronoiEdge edge : cachedEdges.get()) {
-            if (!shouldRenderEdge(edge, camPos, closeLineSkip, farLineSkip, lod0Distance)) {
+        // Find nearest portal to camera for zone detection
+        int nearestPortalIndex = findNearestPortalToCamera(camPos, currentDim, sourceDim);
+
+        // Render cached buckets - organized by group for efficient batch rendering
+        List<EdgeBucket>[] buckets = cachedBuckets.get();
+        for (int group = 0; group < 4; group++) {
+            for (EdgeBucket bucket : buckets[group]) {
+                // Calculate color once for this entire bucket
+                Vector3f color = selectBucketColor(bucket, nearestPortalIndex, gameTime);
+
+                // Render all segments in this bucket with the calculated color
+                for (EdgeSegment segment : bucket.segments) {
+                    if (!shouldRenderSegment(segment, camPos, closeLineSkip, farLineSkip, lod0Distance)) {
+                        continue;
+                    }
+
+                    PortalRenderer.submitLine(matrices, bufferSource,
+                        color.x, color.y, color.z, 0.6f,
+                        0x00F000F0,
+                        segment.start.x, segment.start.y, segment.start.z,
+                        segment.end.x, segment.end.y, segment.end.z,
+                        forward,
+                        bordersUseDepth);
+                }
+            }
+        }
+    }
+
+    /**
+     * Find the nearest portal to the camera position
+     */
+    private int findNearestPortalToCamera(Vec3 camPos, ResourceKey<Level> currentDim, ResourceKey<Level> sourceDim) {
+        PortalManager portalManager = PortalManager.getInstance();
+        Set<PortalInfo> sourcePortals = portalManager.getPortalsInDimension(sourceDim);
+
+        int nearestIndex = -1;
+        double nearestDistSq = Double.MAX_VALUE;
+        int index = 0;
+
+        for (PortalInfo portal : sourcePortals) {
+            if (portalManager.isPortalHidden(portal)) {
+                index++;
                 continue;
             }
-            Vector3f color = usePrimaryColor ? edge.primaryColor : edge.secondaryColor;
 
-            PortalRenderer.submitLine(matrices, bufferSource,
-                color.x, color.y, color.z, 0.6f,
-                0x00F000F0,
-                edge.start.x, edge.start.y, edge.start.z,
-                edge.end.x, edge.end.y, edge.end.z,
-                forward,
-                bordersUseDepth);
+            Vec3 portalPos = sourceDim.equals(currentDim) ? portal.getCenterPos() : portal.getTranslatedPos();
+            double dx = portalPos.x - camPos.x;
+            double dy = portalPos.y - camPos.y;
+            double dz = portalPos.z - camPos.z;
+            double distSq = dx * dx + dy * dy + dz * dz;
+
+            if (distSq < nearestDistSq) {
+                nearestDistSq = distSq;
+                nearestIndex = index;
+            }
+            index++;
         }
+
+        return nearestIndex;
+    }
+
+    /**
+     * Select color for an entire bucket based on group and zone detection
+     * - Each bucket contains edges from one of 4 groups with the same portal pair
+     * - Both colors are visible each frame, but which groups show which color rotates
+     * - Borders where camera is inside show current zone color 75% of the time
+     * - Other borders show 50/50
+     */
+    private Vector3f selectBucketColor(EdgeBucket bucket, int nearestPortalIndex, long gameTime) {
+        // Check if camera is inside this border (one of the two portals is the current zone)
+        boolean isInsideBorder = (nearestPortalIndex == bucket.portal1Index || nearestPortalIndex == bucket.portal2Index);
+
+        // Determine which color is the "current zone" color
+        boolean currentZoneIsPrimary = (nearestPortalIndex == bucket.portal1Index);
+
+        // Calculate phase from game time
+        long phase = (gameTime / 5L) % 4;
+
+        // Determine which color to show based on group and phase
+        boolean showPrimary;
+
+        if (isInsideBorder) {
+            // Inside border: show current zone 75% of time, other zone 25% of time
+            // Rotate which group shows the minority color
+            // Phase 0: Group 0 shows other, Groups 1,2,3 show current (75% current)
+            // Phase 1: Group 1 shows other, Groups 0,2,3 show current (75% current)
+            // Phase 2: Group 2 shows other, Groups 0,1,3 show current (75% current)
+            // Phase 3: Group 3 shows other, Groups 0,1,2 show current (75% current)
+            boolean showCurrent = (bucket.group != phase);
+
+            if (currentZoneIsPrimary) {
+                showPrimary = showCurrent;
+            } else {
+                showPrimary = !showCurrent;
+            }
+        } else {
+            // Outside border: show 50/50, rotating which groups show which color
+            // Phase 0: Groups 0,1 show primary, Groups 2,3 show secondary
+            // Phase 1: Groups 1,2 show primary, Groups 0,3 show secondary
+            // Phase 2: Groups 2,3 show primary, Groups 0,1 show secondary
+            // Phase 3: Groups 3,0 show primary, Groups 1,2 show secondary
+            int relativeGroup = (bucket.group - (int)phase + 4) % 4;
+            showPrimary = (relativeGroup < 2);
+        }
+
+        return showPrimary ? bucket.primaryColor : bucket.secondaryColor;
     }
 
     /**
@@ -161,8 +263,9 @@ public class VoronoiCalculator {
 
     /**
      * Recalculate Voronoi borders with multi-tier LOD system
+     * Organizes edges into buckets by (group, portal_pair) for efficient batch rendering
      */
-    private boolean recalculateVoronoi(RecalcRequest request, ConcurrentLinkedQueue<VoronoiEdge> edgesQueue) {
+    private boolean recalculateVoronoi(RecalcRequest request, java.util.Map<BucketKey, EdgeBucket> bucketMap) {
         int portalCount = request.portalCenters.length;
         if (portalCount < 2) {
             return true;
@@ -202,7 +305,7 @@ public class VoronoiCalculator {
             // Use rectangular grid for all LODs; spacing scales with distance.
             success = calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxRadius, spacing, edgesQueue);
+                effectiveMinRadius, maxRadius, spacing, bucketMap);
 
             if (!success) {
                 return false;
@@ -216,13 +319,15 @@ public class VoronoiCalculator {
             int effectiveMinRadius = Math.max(0, minRadius - spacing);
             if (!calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxDistance, spacing, edgesQueue)) {
+                effectiveMinRadius, maxDistance, spacing, bucketMap)) {
                 return false;
             }
         }
 
+        int totalSegments = bucketMap.values().stream().mapToInt(b -> b.segments.size()).sum();
         System.out.println("[Voronoi] portals=" + portalCount
-            + " edges=" + edgesQueue.size()
+            + " segments=" + totalSegments
+            + " buckets=" + bucketMap.size()
             + " maxDist=" + maxDistance);
         return true;
     }
@@ -295,7 +400,7 @@ public class VoronoiCalculator {
      * Clear cached data
      */
     public void clear() {
-        cachedEdges.set(new ConcurrentLinkedQueue<>());
+        cachedBuckets.set(createEmptyBuckets());
         cachedDimension = null;
         cachedSourceDimension = null;
         cachedPlayerPos = null;
@@ -307,36 +412,87 @@ public class VoronoiCalculator {
     }
 
     /**
-     * Represents a single edge in the Voronoi diagram
+     * Represents a single line segment (just geometry)
      */
-    private static class VoronoiEdge {
+    private static class EdgeSegment {
         final Vec3 start;
         final Vec3 end;
-        final Vector3f primaryColor;
-        final Vector3f secondaryColor;
         final int spacing;
         final boolean alwaysRender;
         final int hash;
 
-        VoronoiEdge(Vec3 start, Vec3 end, Vector3f primaryColor, Vector3f secondaryColor, int spacing) {
+        EdgeSegment(Vec3 start, Vec3 end, int spacing) {
             this.start = start;
             this.end = end;
-            this.primaryColor = primaryColor;
-            this.secondaryColor = secondaryColor;
             this.spacing = spacing;
             this.alwaysRender = spacing == 1;
-            this.hash = hashEdge(start, end);
+            this.hash = hashEdge(start, end, spacing);
+        }
+    }
+
+    /**
+     * Represents a bucket of edges that share the same portal pair and group
+     * This allows us to batch render and calculate color once per bucket
+     */
+    private static class EdgeBucket {
+        final List<EdgeSegment> segments;
+        final Vector3f primaryColor;
+        final Vector3f secondaryColor;
+        final int portal1Index;
+        final int portal2Index;
+        final int group;
+
+        EdgeBucket(Vector3f primaryColor, Vector3f secondaryColor, int portal1Index, int portal2Index, int group) {
+            this.segments = new ArrayList<>();
+            this.primaryColor = new Vector3f(primaryColor);
+            this.secondaryColor = new Vector3f(secondaryColor);
+            this.portal1Index = portal1Index;
+            this.portal2Index = portal2Index;
+            this.group = group;
+        }
+
+        void addSegment(Vec3 start, Vec3 end, int spacing) {
+            segments.add(new EdgeSegment(start, end, spacing));
+        }
+    }
+
+    /**
+     * Key for identifying unique edge buckets
+     */
+    private static class BucketKey {
+        final int group;
+        final int portal1;
+        final int portal2;
+
+        BucketKey(int group, int portal1, int portal2) {
+            this.group = group;
+            this.portal1 = portal1;
+            this.portal2 = portal2;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof BucketKey)) return false;
+            BucketKey that = (BucketKey) o;
+            return group == that.group && portal1 == that.portal1 && portal2 == that.portal2;
+        }
+
+        @Override
+        public int hashCode() {
+            return group * 31 * 31 + portal1 * 31 + portal2;
         }
     }
 
 
     /**
      * Calculate Voronoi edges using rectangular grid.
+     * Adds segments to buckets organized by (group, portal_pair)
      */
     private boolean calculateVoronoiZonesRectangular(RecalcRequest request,
                                                      double[] portalX, double[] portalY, double[] portalZ,
                                                      int minRadius, int maxRadius, int spacing,
-                                                     ConcurrentLinkedQueue<VoronoiEdge> edgesQueue) {
+                                                     java.util.Map<BucketKey, EdgeBucket> bucketMap) {
         Vec3 playerPos = request.playerPos;
         int minX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
         int maxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
@@ -377,8 +533,7 @@ public class VoronoiCalculator {
             }
         }
 
-        // Generate edges where portal zones change
-        List<VoronoiEdge> edges = new ArrayList<>();
+        // Generate edges where portal zones change and add them to buckets
         for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
             for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
                 for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
@@ -394,19 +549,19 @@ public class VoronoiCalculator {
                     // Check neighbors in +X, +Y, +Z directions
                     if (ix + 1 < xCount) {
                         int neighborIdx = ((ix + 1) * yCount + iy) * zCount + iz;
-                        checkNeighborAndAddEdge(edges, nearestPortalIdx, index, neighborIdx,
+                        checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x + spacing, y, z, spacing,
                             request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
                     }
                     if (iy + 1 < yCount) {
                         int neighborIdx = (ix * yCount + (iy + 1)) * zCount + iz;
-                        checkNeighborAndAddEdge(edges, nearestPortalIdx, index, neighborIdx,
+                        checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y + spacing, z, spacing,
                             request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
                     }
                     if (iz + 1 < zCount) {
                         int neighborIdx = (ix * yCount + iy) * zCount + (iz + 1);
-                        checkNeighborAndAddEdge(edges, nearestPortalIdx, index, neighborIdx,
+                        checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y, z + spacing, spacing,
                             request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
                     }
@@ -414,18 +569,19 @@ public class VoronoiCalculator {
             }
         }
 
-        edgesQueue.addAll(edges);
         return true;
     }
 
     /**
-     * Check neighbor and add edge for rectangular grid.
+     * Check neighbor and add segments to appropriate buckets for rectangular grid.
+     * Each segment is assigned to a group (0-3) based on its position within the border plane.
      */
-    private void checkNeighborAndAddEdge(List<VoronoiEdge> edges, int[] nearestPortalIdx,
-                                         int index1, int index2,
-                                         int x1, int y1, int z1, int x2, int y2, int z2, int spacing,
-                                         Vec3[] portalCenters, Vector3f[] portalColors,
-                                         boolean showNeutralBorders, boolean showVerticalBorders) {
+    private void checkNeighborAndAddToBucket(java.util.Map<BucketKey, EdgeBucket> bucketMap,
+                                             int[] nearestPortalIdx,
+                                             int index1, int index2,
+                                             int x1, int y1, int z1, int x2, int y2, int z2, int spacing,
+                                             Vec3[] portalCenters, Vector3f[] portalColors,
+                                             boolean showNeutralBorders, boolean showVerticalBorders) {
         int portal1 = nearestPortalIdx[index1];
         int portal2 = nearestPortalIdx[index2];
 
@@ -463,22 +619,33 @@ public class VoronoiCalculator {
             color2 = portalColors[portal2];
         }
 
-        // Normalize blink ordering so all segments for a portal pair blink in sync.
+        // Normalize ordering so all segments for a portal pair use consistent colors
         Vector3f primaryColor;
         Vector3f secondaryColor;
+        int portal1Index;
+        int portal2Index;
+
         if (portal1 == -1 && portal2 >= 0) {
             primaryColor = portalColors[portal2];
             secondaryColor = NEUTRAL_ZONE_COLOR;
+            portal1Index = portal2;
+            portal2Index = -1;
         } else if (portal2 == -1 && portal1 >= 0) {
             primaryColor = portalColors[portal1];
             secondaryColor = NEUTRAL_ZONE_COLOR;
+            portal1Index = portal1;
+            portal2Index = -1;
         } else if (portal1 >= 0 && portal2 >= 0) {
             if (portal1 <= portal2) {
                 primaryColor = color1;
                 secondaryColor = color2;
+                portal1Index = portal1;
+                portal2Index = portal2;
             } else {
                 primaryColor = color2;
                 secondaryColor = color1;
+                portal1Index = portal2;
+                portal2Index = portal1;
             }
         } else {
             return;
@@ -494,74 +661,70 @@ public class VoronoiCalculator {
         // and draw lines along the other two axes
         if (Math.abs(direction.x) > 0.1 && Math.abs(direction.y) < 0.1 && Math.abs(direction.z) < 0.1) {
             // Border normal along X axis - draw lines along Y and Z
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y + minA, center.z + minA),
-                new Vec3(center.x, center.y + maxA, center.z + minA),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y + minA, center.z + maxA),
-                new Vec3(center.x, center.y + maxA, center.z + maxA),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y + minA, center.z + minA),
-                new Vec3(center.x, center.y + minA, center.z + maxA),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x, center.y + maxA, center.z + minA),
-                new Vec3(center.x, center.y + maxA, center.z + maxA),
-                primaryColor, secondaryColor, spacing));
+            addSegmentToBucket(bucketMap, center.x, center.y + minA, center.z + minA, center.x, center.y + maxA, center.z + minA,
+                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x, center.y + minA, center.z + maxA, center.x, center.y + maxA, center.z + maxA,
+                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x, center.y + minA, center.z + minA, center.x, center.y + minA, center.z + maxA,
+                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x, center.y + maxA, center.z + minA, center.x, center.y + maxA, center.z + maxA,
+                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index);
         } else if (Math.abs(direction.y) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.z) < 0.1) {
             // Border normal along Y axis - draw lines along X and Z
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + minA, center.y, center.z + minA),
-                new Vec3(center.x + maxA, center.y, center.z + minA),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + minA, center.y, center.z + maxA),
-                new Vec3(center.x + maxA, center.y, center.z + maxA),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + minA, center.y, center.z + minA),
-                new Vec3(center.x + minA, center.y, center.z + maxA),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + maxA, center.y, center.z + minA),
-                new Vec3(center.x + maxA, center.y, center.z + maxA),
-                primaryColor, secondaryColor, spacing));
+            addSegmentToBucket(bucketMap, center.x + minA, center.y, center.z + minA, center.x + maxA, center.y, center.z + minA,
+                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x + minA, center.y, center.z + maxA, center.x + maxA, center.y, center.z + maxA,
+                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x + minA, center.y, center.z + minA, center.x + minA, center.y, center.z + maxA,
+                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x + maxA, center.y, center.z + minA, center.x + maxA, center.y, center.z + maxA,
+                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index);
         } else if (Math.abs(direction.z) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.y) < 0.1) {
             // Border normal along Z axis - draw lines along X and Y
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + minA, center.y + minA, center.z),
-                new Vec3(center.x + maxA, center.y + minA, center.z),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + minA, center.y + maxA, center.z),
-                new Vec3(center.x + maxA, center.y + maxA, center.z),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + minA, center.y + minA, center.z),
-                new Vec3(center.x + minA, center.y + maxA, center.z),
-                primaryColor, secondaryColor, spacing));
-            edges.add(new VoronoiEdge(
-                new Vec3(center.x + maxA, center.y + minA, center.z),
-                new Vec3(center.x + maxA, center.y + maxA, center.z),
-                primaryColor, secondaryColor, spacing));
+            addSegmentToBucket(bucketMap, center.x + minA, center.y + minA, center.z, center.x + maxA, center.y + minA, center.z,
+                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x + minA, center.y + maxA, center.z, center.x + maxA, center.y + maxA, center.z,
+                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x + minA, center.y + minA, center.z, center.x + minA, center.y + maxA, center.z,
+                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index);
+            addSegmentToBucket(bucketMap, center.x + maxA, center.y + minA, center.z, center.x + maxA, center.y + maxA, center.z,
+                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index);
         }
     }
 
+    /**
+     * Helper method to add a line segment to the appropriate bucket for a fixed group
+     */
+    private void addSegmentToBucket(java.util.Map<BucketKey, EdgeBucket> bucketMap,
+                                    double x1, double y1, double z1, double x2, double y2, double z2,
+                                    int spacing, int group, Vector3f primaryColor, Vector3f secondaryColor,
+                                    int portal1Index, int portal2Index) {
+        // Create segment positions
+        Vec3 start = new Vec3(x1, y1, z1);
+        Vec3 end = new Vec3(x2, y2, z2);
 
-    private static boolean shouldRenderEdge(VoronoiEdge edge, Vec3 camPos, float closeLineSkip,
-                                            float farLineSkip, int lod0Distance) {
+        // Get or create bucket for this (group, portal_pair)
+        BucketKey key = new BucketKey(group, portal1Index, portal2Index);
+        EdgeBucket bucket = bucketMap.computeIfAbsent(key,
+            k -> new EdgeBucket(primaryColor, secondaryColor, portal1Index, portal2Index, group));
+
+        // Add segment to bucket
+        bucket.addSegment(start, end, spacing);
+    }
+
+
+    private static boolean shouldRenderSegment(EdgeSegment segment, Vec3 camPos, float closeLineSkip,
+                                               float farLineSkip, int lod0Distance) {
         // LOD 0 (spacing == 1) always renders every line with 0% drop
-        if (edge.alwaysRender) {
+        if (segment.alwaysRender) {
             return true;
         }
 
         // Check border draw distance
         double maxBorderDistance = PortalManager.getInstance().getBorderDrawDistance();
-        double midX = (edge.start.x + edge.end.x) * 0.5;
-        double midY = (edge.start.y + edge.end.y) * 0.5;
-        double midZ = (edge.start.z + edge.end.z) * 0.5;
+        double midX = (segment.start.x + segment.end.x) * 0.5;
+        double midY = (segment.start.y + segment.end.y) * 0.5;
+        double midZ = (segment.start.z + segment.end.z) * 0.5;
         double dx = midX - camPos.x;
         double dy = midY - camPos.y;
         double dz = midZ - camPos.z;
@@ -604,14 +767,14 @@ public class VoronoiCalculator {
 
             dropChance = (float) (closeLineSkip + (farLineSkip - closeLineSkip) * t);
         }
-        return fastRandom(edge) >= dropChance;
+        return fastRandom(segment) >= dropChance;
     }
 
-    private static float fastRandom(VoronoiEdge edge) {
-        return (edge.hash & 0x7fffffff) / 2147483647.0f;
+    private static float fastRandom(EdgeSegment segment) {
+        return (segment.hash & 0x7fffffff) / 2147483647.0f;
     }
 
-    private static int hashEdge(Vec3 start, Vec3 end) {
+    private static int hashEdge(Vec3 start, Vec3 end, int spacing) {
         int h = 0x811c9dc5;
         h = (h ^ quantize(start.x)) * 0x01000193;
         h = (h ^ quantize(start.y)) * 0x01000193;
@@ -619,6 +782,7 @@ public class VoronoiCalculator {
         h = (h ^ quantize(end.x)) * 0x01000193;
         h = (h ^ quantize(end.y)) * 0x01000193;
         h = (h ^ quantize(end.z)) * 0x01000193;
+        h = (h ^ spacing) * 0x01000193; // Include spacing to differentiate LOD levels
         return h;
     }
 
@@ -727,15 +891,26 @@ public class VoronoiCalculator {
                 pendingRequest = null;
             }
 
-            ConcurrentLinkedQueue<VoronoiEdge> edgesQueue = new ConcurrentLinkedQueue<>();
-            cachedEdges.set(edgesQueue);
+            // Create bucket map and perform calculation
+            java.util.Map<BucketKey, EdgeBucket> bucketMap = new java.util.HashMap<>();
+            cachedBuckets.set(createEmptyBuckets());
             cachedDimension = request.currentDim;
             cachedSourceDimension = request.sourceDim;
             cachedPlayerPos = request.playerPos;
             cachedSimulateHeld = request.simulateHeld;
-            if (!recalculateVoronoi(request, edgesQueue)) {
+
+            if (!recalculateVoronoi(request, bucketMap)) {
                 continue;
             }
+
+            // Convert bucketMap to array of lists organized by group
+            List<EdgeBucket>[] bucketsByGroup = createEmptyBuckets();
+            for (EdgeBucket bucket : bucketMap.values()) {
+                bucketsByGroup[bucket.group].add(bucket);
+            }
+
+            // Update cache
+            cachedBuckets.set(bucketsByGroup);
             cachedDimension = request.currentDim;
             cachedSourceDimension = request.sourceDim;
             cachedPlayerPos = request.playerPos;
