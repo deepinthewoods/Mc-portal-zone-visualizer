@@ -22,6 +22,8 @@ import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.OptionalDouble;
 import java.util.Set;
 
@@ -37,6 +39,7 @@ public class PortalRenderer {
     private static final RenderType LINES_NO_DEPTH = createLines(false, BORDER_LINE_WIDTH, "portal_zone_lines_no_depth");
     private static final RenderType MARKER_LINES_DEPTH = createLines(true, MARKER_LINE_WIDTH, "portal_zone_marker_lines");
     private static final RenderType MARKER_LINES_NO_DEPTH = createLines(false, MARKER_LINE_WIDTH, "portal_zone_marker_lines_no_depth");
+    private static final List<LabelEntry> LABELS = new ArrayList<>();
 
     public static void render(PoseStack matrices, Camera camera, MultiBufferSource bufferSource) {
         // Check if rendering is enabled
@@ -52,6 +55,7 @@ public class PortalRenderer {
         // Get camera position
         Vec3 camPos = camera.getPosition();
         ResourceKey<Level> currentDim = mc.level.dimension();
+        LABELS.clear();
 
         // Render Voronoi borders first (with depth control)
         VoronoiCalculator.getInstance().render(matrices, bufferSource, camPos, currentDim, camera);
@@ -128,7 +132,35 @@ public class PortalRenderer {
         float labelOffsetY = markerHalfSize.y * 1.5f;
         Vec3 labelOffset = new Vec3(0, -labelOffsetY, 0);
         String displayName = PortalManager.getInstance().getPortalDisplayName(portal);
-        renderLabel(matrices, bufferSource, pos.add(labelOffset), displayName, color, distance, camera);
+        queueLabel(pos.add(labelOffset), displayName, color, distance);
+    }
+
+    public static void renderLabels(PoseStack matrices, Camera camera) {
+        if (!PortalZoneVisualizerClient.isRenderingEnabled()) {
+            LABELS.clear();
+            return;
+        }
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || mc.player == null) {
+            LABELS.clear();
+            return;
+        }
+
+        if (LABELS.isEmpty()) {
+            return;
+        }
+
+        MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
+        for (LabelEntry entry : LABELS) {
+            renderLabel(matrices, bufferSource, entry.pos, entry.text, entry.color, entry.distance, camera);
+        }
+        bufferSource.endBatch();
+        LABELS.clear();
+    }
+
+    private static void queueLabel(Vec3 pos, String text, Vector3f color, double distance) {
+        LABELS.add(new LabelEntry(pos, text, new Vector3f(color), distance));
     }
 
     /**
@@ -367,6 +399,8 @@ public class PortalRenderer {
             builder.createCompositeState(false)
         );
     }
+
+    private record LabelEntry(Vec3 pos, String text, Vector3f color, double distance) {}
 
     private record Vec2(float x, float y) {}
 }

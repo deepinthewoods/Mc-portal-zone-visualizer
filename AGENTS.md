@@ -31,7 +31,7 @@
 - Build: `./gradlew build`
 - Run client: `./gradlew runClient`
 - Java 21 required (see `gradle.properties`).
-- After changes, try a Gradle build to confirm compilation.
+- After changes, try a Gradle build to confirm compilation. Always do this after modifying code, no need to ask the user.
 
 ## Behavior notes
 - Voronoi sampling parameters live in `VoronoiCalculator` (SAMPLE_SPACING, LOCAL_RADIUS).

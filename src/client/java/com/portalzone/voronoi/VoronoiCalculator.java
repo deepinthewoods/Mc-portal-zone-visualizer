@@ -30,8 +30,8 @@ public class VoronoiCalculator {
 
     // LOD (Level of Detail) constants
     private static final int MAX_BORDER_DISTANCE = 2048; // Increase to render farther borders.
-    private static final int[] BASE_LOD_RADII = new int[] {512};
-    private static final int[] LOD_SPACING = new int[] {1, 8};
+    private static final int[] BASE_LOD_RADII = new int[] {256, 1024};
+    private static final int[] LOD_SPACING = new int[] {1, 4, 16};
     private static final int TILE_SIZE = 128;
 
     // Neutral zone color (for areas with no portal in range)

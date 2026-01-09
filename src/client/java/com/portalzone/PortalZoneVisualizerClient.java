@@ -120,6 +120,25 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
             PortalRenderer.render(matrices, camera, context.consumers());
             matrices.popPose();
         });
+
+        WorldRenderEvents.END_MAIN.register(context -> {
+            var matrices = context.matrices();
+            if (matrices == null) {
+                return;
+            }
+
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null || mc.player == null) {
+                return;
+            }
+
+            var camera = mc.gameRenderer.getMainCamera();
+            var camPos = camera.getPosition();
+            matrices.pushPose();
+            matrices.translate(-camPos.x, -camPos.y, -camPos.z);
+            PortalRenderer.renderLabels(matrices, camera);
+            matrices.popPose();
+        });
     }
 
     public static boolean isRenderingEnabled() {

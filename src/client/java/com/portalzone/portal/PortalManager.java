@@ -624,7 +624,11 @@ public class PortalManager {
      * Set whether portal markers should always be visible (no depth testing)
      */
     public void setPortalMarkersAlwaysVisible(boolean alwaysVisible) {
+        if (this.portalMarkersAlwaysVisible == alwaysVisible) {
+            return;
+        }
         this.portalMarkersAlwaysVisible = alwaysVisible;
+        saveSettingsNow();
     }
 
     /**
@@ -638,7 +642,11 @@ public class PortalManager {
      * Set whether borders should always be visible (no depth testing)
      */
     public void setBordersAlwaysVisible(boolean alwaysVisible) {
+        if (this.bordersAlwaysVisible == alwaysVisible) {
+            return;
+        }
         this.bordersAlwaysVisible = alwaysVisible;
+        saveSettingsNow();
     }
 
     /**
@@ -652,8 +660,12 @@ public class PortalManager {
      * Set whether neutral (grey) borders should be rendered
      */
     public void setNeutralBordersEnabled(boolean enabled) {
+        if (this.showNeutralBorders == enabled) {
+            return;
+        }
         this.showNeutralBorders = enabled;
         portalsChanged = true;
+        saveSettingsNow();
     }
 
     /**
@@ -667,8 +679,12 @@ public class PortalManager {
      * Set whether vertical border lines should be rendered
      */
     public void setVerticalBordersEnabled(boolean enabled) {
+        if (this.showVerticalBorders == enabled) {
+            return;
+        }
         this.showVerticalBorders = enabled;
         portalsChanged = true;
+        saveSettingsNow();
     }
 
     /**
@@ -682,8 +698,19 @@ public class PortalManager {
      * Set the minimum portal marker screen size (percent of long screen side)
      */
     public void setMinimumMarkerScreenPercent(float percent) {
+        if (!Float.isFinite(percent)) {
+            if (this.minimumMarkerScreenPercent != 2.0f) {
+                this.minimumMarkerScreenPercent = 2.0f;
+                saveSettingsNow();
+            }
+            return;
+        }
         float clamped = Math.max(0.0f, Math.min(20.0f, percent));
+        if (Float.compare(this.minimumMarkerScreenPercent, clamped) == 0) {
+            return;
+        }
         this.minimumMarkerScreenPercent = clamped;
+        saveSettingsNow();
     }
 
     /**
@@ -697,7 +724,19 @@ public class PortalManager {
      * Set the maximum border fuzz discard probability (0-1).
      */
     public void setBorderFuzzThreshold(float threshold) {
-        this.borderFuzzThreshold = Math.max(0.0f, Math.min(1.0f, threshold));
+        if (!Float.isFinite(threshold)) {
+            if (this.borderFuzzThreshold != 0.0f) {
+                this.borderFuzzThreshold = 0.0f;
+                saveSettingsNow();
+            }
+            return;
+        }
+        float clamped = Math.max(0.0f, Math.min(1.0f, threshold));
+        if (Float.compare(this.borderFuzzThreshold, clamped) == 0) {
+            return;
+        }
+        this.borderFuzzThreshold = clamped;
+        saveSettingsNow();
     }
 
     /**
@@ -711,7 +750,12 @@ public class PortalManager {
      * Set the distance (blocks) where border fuzz begins.
      */
     public void setBorderFuzzStartDistance(int distance) {
-        this.borderFuzzStartDistance = Math.max(4, Math.min(256, distance));
+        int clamped = Math.max(4, Math.min(256, distance));
+        if (this.borderFuzzStartDistance == clamped) {
+            return;
+        }
+        this.borderFuzzStartDistance = clamped;
+        saveSettingsNow();
     }
 
     /**
@@ -726,7 +770,11 @@ public class PortalManager {
      * Use -1 for infinite distance.
      */
     public void setPortalMarkerDrawDistance(double distance) {
+        if (Double.compare(this.portalMarkerDrawDistance, distance) == 0) {
+            return;
+        }
         this.portalMarkerDrawDistance = distance;
+        saveSettingsNow();
     }
 
     /**
@@ -748,7 +796,12 @@ public class PortalManager {
      * Set the border draw distance (in blocks).
      */
     public void setBorderDrawDistance(double distance) {
-        this.borderDrawDistance = Math.max(16.0, Math.min(2048.0, distance));
+        double clamped = Math.max(16.0, Math.min(2048.0, distance));
+        if (Double.compare(this.borderDrawDistance, clamped) == 0) {
+            return;
+        }
+        this.borderDrawDistance = clamped;
+        saveSettingsNow();
     }
 
     /**
