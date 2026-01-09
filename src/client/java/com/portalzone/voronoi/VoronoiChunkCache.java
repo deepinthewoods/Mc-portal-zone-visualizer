@@ -32,9 +32,10 @@ public class VoronoiChunkCache {
 
     /**
      * Default maximum number of chunks to cache.
-     * At ~10KB per chunk average, this is roughly 20MB of cache.
+     * At ~10KB per chunk average, this is roughly 80MB of cache.
      */
-    private static final int DEFAULT_MAX_CACHE_SIZE = 2000;
+    private static final int DEFAULT_MAX_CACHE_SIZE = 8192;
+    private static final long EVICTION_LOG_COOLDOWN_MS = 5000L;
 
     /**
      * Backing store for cached chunks.
@@ -64,6 +65,7 @@ public class VoronoiChunkCache {
      * Thread-safe atomic counter.
      */
     private final AtomicLong evictions;
+    private final AtomicLong lastEvictionLogMs;
 
     /**
      * Creates a cache with the default maximum size.
@@ -87,6 +89,7 @@ public class VoronoiChunkCache {
         this.cacheHits = new AtomicLong(0);
         this.cacheMisses = new AtomicLong(0);
         this.evictions = new AtomicLong(0);
+        this.lastEvictionLogMs = new AtomicLong(0);
     }
 
     /**
@@ -309,9 +312,12 @@ public class VoronoiChunkCache {
             return;
         }
 
-        System.out.println("[VoronoiChunkCache] Cache size (" + currentSize +
-                         ") exceeds max (" + maxCacheSize + "), evicting " +
-                         toRemove + " oldest chunks");
+        boolean logEviction = shouldLogEviction();
+        if (logEviction) {
+            System.out.println("[VoronoiChunkCache] Cache size (" + currentSize +
+                ") exceeds max (" + maxCacheSize + "), evicting " +
+                toRemove + " oldest chunks");
+        }
 
         // Find the N oldest entries by timestamp
         cache.entrySet().stream()
@@ -323,7 +329,18 @@ public class VoronoiChunkCache {
                 }
             });
 
-        System.out.println("[VoronoiChunkCache] Eviction complete, new size: " + cache.size());
+        if (logEviction) {
+            System.out.println("[VoronoiChunkCache] Eviction complete, new size: " + cache.size());
+        }
+    }
+
+    private boolean shouldLogEviction() {
+        long now = System.currentTimeMillis();
+        long last = lastEvictionLogMs.get();
+        if (now - last < EVICTION_LOG_COOLDOWN_MS) {
+            return false;
+        }
+        return lastEvictionLogMs.compareAndSet(last, now);
     }
 
     /**

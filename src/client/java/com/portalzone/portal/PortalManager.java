@@ -11,7 +11,6 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
@@ -20,7 +19,16 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.joml.Vector3f;
 
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -46,9 +54,12 @@ public class PortalManager {
     private final Map<ResourceKey<Level>, Map<UUID, PortalInfo>> simulatedPortals = new ConcurrentHashMap<>();
 
     // Track which chunks have been scanned
-    private final Map<ResourceKey<Level>, Map<ChunkPos, Long>> scannedChunks = new ConcurrentHashMap<>();
+    private final Map<ResourceKey<Level>, Map<ChunkPos, ScanMode>> scannedChunks = new ConcurrentHashMap<>();
 
-    private static final long RESCAN_INTERVAL_TICKS = 200;
+    private static final int COARSE_SCAN_STEP = 3;
+    private static final int MAX_CHUNK_SCANS_PER_TICK = 1;
+    private final Deque<ChunkScanTask> scanQueue = new ArrayDeque<>();
+    private final Map<ResourceKey<Level>, Map<ChunkPos, ScanMode>> pendingScans = new ConcurrentHashMap<>();
 
     // Flag to indicate portals have changed (for Voronoi recalculation)
     private boolean portalsChanged = true;
@@ -66,6 +77,7 @@ public class PortalManager {
 
     private boolean flipBordersHeld = false;
     private boolean simulatePortalHeld = false;
+    private boolean portalDiscoveryEnabled = true;
 
     // Depth testing settings
     private boolean portalMarkersAlwaysVisible = true; // Default: always visible
@@ -99,6 +111,23 @@ public class PortalManager {
         }
     }
 
+    public enum ScanMode {
+        COARSE,
+        FULL
+    }
+
+    private static class ChunkScanTask {
+        private final ResourceKey<Level> dimension;
+        private final ChunkPos chunkPos;
+        private final ScanMode mode;
+
+        private ChunkScanTask(ResourceKey<Level> dimension, ChunkPos chunkPos, ScanMode mode) {
+            this.dimension = dimension;
+            this.chunkPos = chunkPos;
+            this.mode = mode;
+        }
+    }
+
     // Draw distance settings
     private static final double INFINITE_DRAW_DISTANCE = -1.0; // Special value for infinite distance
     private double portalMarkerDrawDistance = INFINITE_DRAW_DISTANCE; // Default: infinite
@@ -123,61 +152,152 @@ public class PortalManager {
             return;
         }
 
-        // Scan chunks in current dimension
-        scanLoadedChunks(level);
+        // Process queued chunk scans for the current dimension
+        processScanQueue(level);
 
         // TODO: Scan chunks in the other dimension
         // This requires loading chunks from the other dimension
         // We'll implement this in the cross-dimension scanning task
     }
 
-    /**
-     * Scan all loaded chunks in the given level for portals
-     */
-    private void scanLoadedChunks(ClientLevel level) {
-        ResourceKey<Level> dimension = level.dimension();
-        Minecraft mc = Minecraft.getInstance();
-        long currentTick = level.getGameTime();
+    public void handleChunkLoad(ClientLevel level, LevelChunk chunk) {
+        if (!portalDiscoveryEnabled) {
+            return;
+        }
+        queueChunkScan(level.dimension(), chunk.getPos(), ScanMode.COARSE);
+    }
 
+    public void handleChunkUnload(ResourceKey<Level> dimension, ChunkPos chunkPos) {
+        Map<ChunkPos, ScanMode> scanned = scannedChunks.get(dimension);
+        if (scanned != null) {
+            scanned.remove(chunkPos);
+        }
+        Map<ChunkPos, ScanMode> pending = pendingScans.get(dimension);
+        if (pending != null) {
+            pending.remove(chunkPos);
+        }
+    }
+
+    private void processScanQueue(ClientLevel level) {
+        if (!portalDiscoveryEnabled) {
+            return;
+        }
+
+        int remaining = MAX_CHUNK_SCANS_PER_TICK;
+        ResourceKey<Level> dimension = level.dimension();
+
+        while (remaining > 0) {
+            ChunkScanTask task = scanQueue.pollFirst();
+            if (task == null) {
+                return;
+            }
+
+            Map<ChunkPos, ScanMode> pending = pendingScans.get(task.dimension);
+            if (pending == null) {
+                continue;
+            }
+
+            ScanMode pendingMode = pending.get(task.chunkPos);
+            if (pendingMode != task.mode) {
+                continue;
+            }
+
+            if (!dimension.equals(task.dimension)) {
+                pending.remove(task.chunkPos);
+                continue;
+            }
+
+            if (!level.hasChunk(task.chunkPos.x, task.chunkPos.z)) {
+                pending.remove(task.chunkPos);
+                continue;
+            }
+
+            Map<ChunkPos, ScanMode> scanned = scannedChunks.computeIfAbsent(task.dimension, k -> new ConcurrentHashMap<>());
+            ScanMode scannedMode = scanned.get(task.chunkPos);
+            if (isScanSatisfied(scannedMode, task.mode)) {
+                pending.remove(task.chunkPos);
+                continue;
+            }
+
+            LevelChunk chunk = level.getChunk(task.chunkPos.x, task.chunkPos.z);
+            if (chunk == null) {
+                pending.remove(task.chunkPos);
+                continue;
+            }
+
+            int yStep = task.mode == ScanMode.COARSE ? COARSE_SCAN_STEP : 1;
+            boolean foundPortal = scanChunk(level, chunk, task.dimension, yStep);
+            markChunkScanned(scanned, task.chunkPos, task.mode);
+            pending.remove(task.chunkPos);
+            remaining--;
+
+            if (task.mode == ScanMode.COARSE && foundPortal) {
+                queueChunkScan(task.dimension, task.chunkPos, ScanMode.FULL);
+            }
+        }
+    }
+
+    private boolean isScanSatisfied(ScanMode scannedMode, ScanMode requestedMode) {
+        if (scannedMode == null) {
+            return false;
+        }
+        if (scannedMode == ScanMode.FULL) {
+            return true;
+        }
+        return requestedMode == ScanMode.COARSE;
+    }
+
+    private void markChunkScanned(Map<ChunkPos, ScanMode> scanned, ChunkPos chunkPos, ScanMode mode) {
+        if (mode == ScanMode.FULL) {
+            scanned.put(chunkPos, ScanMode.FULL);
+            return;
+        }
+        scanned.putIfAbsent(chunkPos, ScanMode.COARSE);
+    }
+
+    public void queueChunkScan(ResourceKey<Level> dimension, ChunkPos chunkPos, ScanMode mode) {
+        if (!portalDiscoveryEnabled) {
+            return;
+        }
+
+        Map<ChunkPos, ScanMode> scanned = scannedChunks.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
+        ScanMode scannedMode = scanned.get(chunkPos);
+        if (isScanSatisfied(scannedMode, mode)) {
+            return;
+        }
+
+        Map<ChunkPos, ScanMode> pending = pendingScans.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
+        ScanMode pendingMode = pending.get(chunkPos);
+        if (pendingMode == ScanMode.FULL) {
+            return;
+        }
+
+        if (pendingMode == null || (pendingMode == ScanMode.COARSE && mode == ScanMode.FULL)) {
+            pending.put(chunkPos, mode);
+            scanQueue.addLast(new ChunkScanTask(dimension, chunkPos, mode));
+        }
+    }
+
+    private void queueLoadedChunksAroundPlayer(ClientLevel level) {
+        Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) {
             return;
         }
 
-        // Get player chunk position
         BlockPos playerPos = mc.player.blockPosition();
         int playerChunkX = playerPos.getX() >> 4;
         int playerChunkZ = playerPos.getZ() >> 4;
-
-        // Scan chunks in a radius around the player
         int chunkRadius = mc.options.renderDistance().get();
+        ResourceKey<Level> dimension = level.dimension();
 
         for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
             for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
                 int chunkX = playerChunkX + dx;
                 int chunkZ = playerChunkZ + dz;
-                ChunkPos chunkPos = new ChunkPos(chunkX, chunkZ);
-
-                // Check if chunk is loaded
                 if (!level.hasChunk(chunkX, chunkZ)) {
                     continue;
                 }
-
-                // Try to get the chunk
-                LevelChunk chunk = level.getChunk(chunkX, chunkZ);
-                if (chunk == null) {
-                    continue;
-                }
-
-                // Skip if recently scanned
-                Map<ChunkPos, Long> scanned = scannedChunks.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
-                Long lastScannedTick = scanned.get(chunkPos);
-                if (lastScannedTick != null && currentTick - lastScannedTick < RESCAN_INTERVAL_TICKS) {
-                    continue;
-                }
-
-                // Scan this chunk for portals
-                scanChunk(level, chunk, dimension);
-                scanned.put(chunkPos, currentTick);
+                queueChunkScan(dimension, new ChunkPos(chunkX, chunkZ), ScanMode.COARSE);
             }
         }
     }
@@ -185,7 +305,7 @@ public class PortalManager {
     /**
      * Scan a single chunk for portal blocks
      */
-    private void scanChunk(ClientLevel level, LevelChunk chunk, ResourceKey<Level> dimension) {
+    private boolean scanChunk(ClientLevel level, LevelChunk chunk, ResourceKey<Level> dimension, int yStep) {
         ChunkPos chunkPos = chunk.getPos();
         int minX = chunkPos.getMinBlockX();
         int minZ = chunkPos.getMinBlockZ();
@@ -193,11 +313,12 @@ public class PortalManager {
         int maxZ = chunkPos.getMaxBlockZ();
 
         Set<BlockPos> processedPositions = new HashSet<>();
+        boolean foundPortal = false;
 
         // Scan the chunk
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
-                for (int y = level.getMinY(); y < level.getMaxY(); y++) {
+                for (int y = level.getMinY(); y < level.getMaxY(); y += yStep) {
                     BlockPos pos = new BlockPos(x, y, z);
 
                     if (processedPositions.contains(pos)) {
@@ -210,6 +331,7 @@ public class PortalManager {
                         PortalInfo portal = identifyPortal(level, pos, processedPositions);
                         if (portal != null) {
                             addPortal(dimension, portal);
+                            foundPortal = true;
                         }
                     }
                 }
@@ -218,6 +340,7 @@ public class PortalManager {
 
         // Validate persisted portals in this chunk
         validatePersistedPortalsInChunk(level, chunkPos, dimension);
+        return foundPortal;
     }
 
     /**
@@ -565,6 +688,8 @@ public class PortalManager {
         persistedPortals.clear();
         simulatedPortals.clear();
         scannedChunks.clear();
+        pendingScans.clear();
+        scanQueue.clear();
         portalNames.clear();
         portalHues.clear();
         hiddenPortals.clear();
@@ -677,6 +802,27 @@ public class PortalManager {
      */
     public boolean isBordersAlwaysVisible() {
         return bordersAlwaysVisible;
+    }
+
+    public void setPortalDiscoveryEnabled(boolean enabled) {
+        if (this.portalDiscoveryEnabled == enabled) {
+            return;
+        }
+        this.portalDiscoveryEnabled = enabled;
+        if (!enabled) {
+            pendingScans.clear();
+            scanQueue.clear();
+        } else {
+            ClientLevel level = Minecraft.getInstance().level;
+            if (level != null) {
+                queueLoadedChunksAroundPlayer(level);
+            }
+        }
+        saveSettingsNow();
+    }
+
+    public boolean isPortalDiscoveryEnabled() {
+        return portalDiscoveryEnabled;
     }
 
     /**
@@ -856,6 +1002,7 @@ public class PortalManager {
 
         // Clear scanned chunks
         scannedChunks.remove(dimension);
+        pendingScans.remove(dimension);
 
         portalsChanged = true;
         saveSettingsNow();
@@ -869,6 +1016,8 @@ public class PortalManager {
         persistedPortals.clear();
         simulatedPortals.clear();
         scannedChunks.clear();
+        pendingScans.clear();
+        scanQueue.clear();
         hiddenPortals.clear();
         portalsChanged = true;
         saveSettingsNow();
@@ -953,6 +1102,9 @@ public class PortalManager {
             }
             if (root.has("borderDrawDistance")) {
                 setBorderDrawDistance(root.get("borderDrawDistance").getAsDouble());
+            }
+            if (root.has("portalDiscoveryEnabled")) {
+                portalDiscoveryEnabled = root.get("portalDiscoveryEnabled").getAsBoolean();
             }
 
             // Load persisted portals
@@ -1051,6 +1203,7 @@ public class PortalManager {
         // Save draw distance settings
         root.addProperty("portalMarkerDrawDistance", portalMarkerDrawDistance);
         root.addProperty("borderDrawDistance", borderDrawDistance);
+        root.addProperty("portalDiscoveryEnabled", portalDiscoveryEnabled);
 
         // Save persisted portals
         JsonObject portalsJson = new JsonObject();
@@ -1100,9 +1253,13 @@ public class PortalManager {
      * Invalidate chunks (e.g., when blocks change)
      */
     public void invalidateChunk(ResourceKey<Level> dimension, ChunkPos chunkPos) {
-        Map<ChunkPos, Long> scanned = scannedChunks.get(dimension);
+        Map<ChunkPos, ScanMode> scanned = scannedChunks.get(dimension);
         if (scanned != null) {
             scanned.remove(chunkPos);
+        }
+        Map<ChunkPos, ScanMode> pending = pendingScans.get(dimension);
+        if (pending != null) {
+            pending.remove(chunkPos);
         }
 
         // Remove portals in this chunk
@@ -1113,6 +1270,10 @@ public class PortalManager {
                 return portalChunk.equals(chunkPos);
             });
             portalsChanged = true;
+        }
+
+        if (portalDiscoveryEnabled) {
+            queueChunkScan(dimension, chunkPos, ScanMode.FULL);
         }
     }
 

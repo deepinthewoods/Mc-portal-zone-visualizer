@@ -21,6 +21,23 @@ public class ChunkBoundaryCalculator {
      * @return A set of chunk coordinates (no duplicates) covering the required region
      */
     public static Set<ChunkCoord> getRequiredChunks(Vec3 playerPos, int maxDistance, int chunkSize) {
+        return getRequiredChunks(playerPos, maxDistance, chunkSize,
+            Integer.MIN_VALUE, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Determines all chunk coordinates that fall within maxDistance blocks of the player position,
+     * clamped to the provided Y bounds.
+     *
+     * @param playerPos    The player's world position
+     * @param maxDistance  The maximum distance in blocks from the player
+     * @param chunkSize    The size of each chunk in blocks (typically 128)
+     * @param minY         Minimum Y bound to include (inclusive)
+     * @param maxY         Maximum Y bound to include (inclusive)
+     * @return A set of chunk coordinates (no duplicates) covering the required region
+     */
+    public static Set<ChunkCoord> getRequiredChunks(Vec3 playerPos, int maxDistance, int chunkSize,
+                                                    int minY, int maxY) {
         Set<ChunkCoord> chunks = new HashSet<>();
 
         // Calculate the min and max block coordinates for the bounding box
@@ -30,6 +47,14 @@ public class ChunkBoundaryCalculator {
         int maxBlockY = (int) Math.floor(playerPos.y + maxDistance);
         int minBlockZ = (int) Math.floor(playerPos.z - maxDistance);
         int maxBlockZ = (int) Math.floor(playerPos.z + maxDistance);
+
+        // Clamp Y to world bounds to avoid unnecessary vertical chunk work
+        minBlockY = Math.max(minBlockY, minY);
+        maxBlockY = Math.min(maxBlockY, maxY);
+
+        if (minBlockY > maxBlockY) {
+            return chunks;
+        }
 
         // Convert block coordinates to chunk coordinates using floor division
         int minChunkX = Math.floorDiv(minBlockX, chunkSize);

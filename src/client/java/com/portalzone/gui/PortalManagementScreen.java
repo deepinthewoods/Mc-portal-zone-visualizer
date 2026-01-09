@@ -87,6 +87,19 @@ public class PortalManagementScreen extends BaseScreen {
         this.addWidget(portalMarkersCheckbox);
         y += 15;
 
+        // Portal discovery checkbox
+        WidgetCheckBox discoveryCheckbox = new WidgetCheckBox(
+            x,
+            y,
+            MaLiLibIcons.MINUS,
+            MaLiLibIcons.PLUS,
+            "Enable Portal Discovery"
+        );
+        discoveryCheckbox.setChecked(manager.isPortalDiscoveryEnabled());
+        discoveryCheckbox.setListener((checkBox) -> manager.setPortalDiscoveryEnabled(checkBox.isChecked()));
+        this.addWidget(discoveryCheckbox);
+        y += 15;
+
         // Borders checkbox
         WidgetCheckBox bordersCheckbox = new WidgetCheckBox(
             x,

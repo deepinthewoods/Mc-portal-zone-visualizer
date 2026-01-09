@@ -33,6 +33,9 @@ public class VoronoiCalculator {
     private static final int[] BASE_LOD_RADII = new int[] {256, 1024};
     private static final int[] LOD_SPACING = new int[] {1, 4, 16};
     private static final int TILE_SIZE = 128;
+    private static final int WORLD_MIN_Y = -64;
+    private static final int WORLD_MAX_Y = 320;
+    private static final int FINAL_LOD_LEVEL = LOD_SPACING.length;
 
     // Neutral zone color (for areas with no portal in range)
     private static final Vector3f NEUTRAL_ZONE_COLOR = new Vector3f(0.8f, 0.8f, 0.8f);
@@ -42,7 +45,7 @@ public class VoronoiCalculator {
     private final VoronoiChunkCache chunkCache;
     private long cachedPortalConfigHash = 0L;
     private int chunkSize = 128; // Matches TILE_SIZE
-    private int chunkCacheMaxSize = 2000;
+    private int chunkCacheMaxSize = 8192;
 
     // Cached Voronoi edges organized by group (0-3) for efficient batch rendering
     // bucketsByGroup[group] = List of EdgeBucket for that group
@@ -59,8 +62,8 @@ public class VoronoiCalculator {
     private volatile boolean lastRequestedSimulateHeld = false;
     private final Object recalcLock = new Object();
     private RecalcRequest pendingRequest = null;
+    private volatile RecalcRequest latestQueuedRequest = null;
     private final AtomicLong requestId = new AtomicLong();
-    private volatile long latestRequestId = 0;
 
     private VoronoiCalculator() {
         // Initialize chunk cache
@@ -145,6 +148,7 @@ public class VoronoiCalculator {
         boolean bordersUseDepth = !bordersAlwaysVisible;
         PortalManager.LineRenderPreset preset = PortalManager.getInstance().getLineRenderPreset();
         int lod0Distance = PortalManager.getInstance().getLod0Distance();
+        int[] lodRadii = buildLodRadii(lod0Distance);
 
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
         long phase = (gameTime / 5L) % 3; // 3-phase rotation matching color alternation speed
@@ -161,7 +165,7 @@ public class VoronoiCalculator {
 
                 // Render all segments in this bucket with the calculated color
                 for (EdgeSegment segment : bucket.segments) {
-                    if (!shouldRenderSegment(segment, camPos, group, preset, phase, lod0Distance)) {
+                    if (!shouldRenderSegment(segment, camPos, group, preset, phase, lod0Distance, lodRadii)) {
                         continue;
                     }
 
@@ -325,7 +329,7 @@ public class VoronoiCalculator {
             // Use rectangular grid for all LODs; spacing scales with distance.
             success = calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxRadius, spacing, bucketMap,
+                effectiveMinRadius, maxRadius, spacing, i, true, bucketMap,
                 null, null, null, null, null, null);
 
             if (!success) {
@@ -340,7 +344,7 @@ public class VoronoiCalculator {
             int effectiveMinRadius = Math.max(0, minRadius - spacing);
             if (!calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxDistance, spacing, bucketMap,
+                effectiveMinRadius, maxDistance, spacing, LOD_SPACING.length - 1, true, bucketMap,
                 null, null, null, null, null, null)) {
                 return false;
             }
@@ -400,7 +404,7 @@ public class VoronoiCalculator {
 
             // Get required chunks for this LOD level
             Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
-                request.playerPos, maxRadius, chunkSize);
+                request.playerPos, maxRadius, chunkSize, WORLD_MIN_Y, WORLD_MAX_Y);
 
             System.out.println("[VoronoiChunk] LOD " + lodLevel + ": " + requiredChunks.size() +
                 " chunks in range (radius " + minRadius + "-" + maxRadius + ")");
@@ -408,8 +412,7 @@ public class VoronoiCalculator {
             // For each required chunk, check cache or calculate
             for (ChunkCoord chunkCoord : requiredChunks) {
                 // Check for cancellation
-                if (request.id != latestRequestId) {
-                    System.out.println("[VoronoiChunk] Calculation cancelled");
+                if (shouldCancelRequest(request)) {
                     return false;
                 }
 
@@ -452,15 +455,15 @@ public class VoronoiCalculator {
 
         // Handle final LOD level beyond configured radii
         if (minRadius < maxDistance) {
-            int lodLevel = LOD_SPACING.length - 1;
+            int lodLevel = FINAL_LOD_LEVEL;
             Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
-                request.playerPos, maxDistance, chunkSize);
+                request.playerPos, maxDistance, chunkSize, WORLD_MIN_Y, WORLD_MAX_Y);
 
             System.out.println("[VoronoiChunk] Final LOD: " + requiredChunks.size() +
                 " chunks in range (radius " + minRadius + "-" + maxDistance + ")");
 
             for (ChunkCoord chunkCoord : requiredChunks) {
-                if (request.id != latestRequestId) {
+                if (shouldCancelRequest(request)) {
                     return false;
                 }
 
@@ -549,6 +552,16 @@ public class VoronoiCalculator {
             radii[i] = Math.max(candidate, radii[i - 1]);
         }
         return radii;
+    }
+
+    private static int getSpacingForLod(int lodLevel) {
+        if (lodLevel < 0) {
+            return LOD_SPACING[0];
+        }
+        if (lodLevel >= LOD_SPACING.length) {
+            return LOD_SPACING[LOD_SPACING.length - 1];
+        }
+        return LOD_SPACING[lodLevel];
     }
 
 
@@ -730,13 +743,15 @@ public class VoronoiCalculator {
         final Vec3 end;
         final int spacing;
         final boolean alwaysRender;
+        final int lodLevel;
         final int hash;
 
-        EdgeSegment(Vec3 start, Vec3 end, int spacing) {
+        EdgeSegment(Vec3 start, Vec3 end, int spacing, int lodLevel) {
             this.start = start;
             this.end = end;
             this.spacing = spacing;
             this.alwaysRender = spacing == 1;
+            this.lodLevel = lodLevel;
             this.hash = hashEdge(start, end, spacing);
         }
     }
@@ -762,8 +777,8 @@ public class VoronoiCalculator {
             this.group = group;
         }
 
-        void addSegment(Vec3 start, Vec3 end, int spacing) {
-            segments.add(new EdgeSegment(start, end, spacing));
+        void addSegment(Vec3 start, Vec3 end, int spacing, int lodLevel) {
+            segments.add(new EdgeSegment(start, end, spacing, lodLevel));
         }
     }
 
@@ -809,22 +824,14 @@ public class VoronoiCalculator {
      */
     private boolean calculateVoronoiZonesRectangular(RecalcRequest request,
                                                      double[] portalX, double[] portalY, double[] portalZ,
-                                                     int minRadius, int maxRadius, int spacing,
+                                                     int minRadius, int maxRadius, int spacing, int lodLevel,
+                                                     boolean useDistanceFilter,
                                                      java.util.Map<BucketKey, EdgeBucket> bucketMap,
                                                      Integer chunkMinX, Integer chunkMaxX,
                                                      Integer chunkMinY, Integer chunkMaxY,
                                                      Integer chunkMinZ, Integer chunkMaxZ) {
         Vec3 playerPos = request.playerPos;
 
-        // Calculate bounds from sphere (old behavior)
-        int sphereMinX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
-        int sphereMaxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
-        int sphereMinY = Math.max((int) Math.floor((playerPos.y - maxRadius) / spacing) * spacing, -64);
-        int sphereMaxY = Math.min((int) Math.ceil((playerPos.y + maxRadius) / spacing) * spacing, 320);
-        int sphereMinZ = (int) Math.floor((playerPos.z - maxRadius) / spacing) * spacing;
-        int sphereMaxZ = (int) Math.ceil((playerPos.z + maxRadius) / spacing) * spacing;
-
-        // If chunk bounds provided, intersect them with sphere bounds and align to spacing
         int minX, maxX, minY, maxY, minZ, maxZ;
         if (chunkMinX != null && chunkMaxX != null && chunkMinY != null &&
             chunkMaxY != null && chunkMinZ != null && chunkMaxZ != null) {
@@ -836,15 +843,32 @@ public class VoronoiCalculator {
             minZ = (int) Math.floor((double) chunkMinZ / spacing) * spacing;
             maxZ = (int) Math.ceil((double) chunkMaxZ / spacing) * spacing;
 
-            // Intersect with sphere bounds to avoid calculating outside the LOD range
-            minX = Math.max(minX, sphereMinX);
-            maxX = Math.min(maxX, sphereMaxX);
-            minY = Math.max(minY, sphereMinY);
-            maxY = Math.min(maxY, sphereMaxY);
-            minZ = Math.max(minZ, sphereMinZ);
-            maxZ = Math.min(maxZ, sphereMaxZ);
+            if (useDistanceFilter) {
+                // Calculate bounds from sphere (old behavior)
+                int sphereMinX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
+                int sphereMaxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
+                int sphereMinY = Math.max((int) Math.floor((playerPos.y - maxRadius) / spacing) * spacing, WORLD_MIN_Y);
+                int sphereMaxY = Math.min((int) Math.ceil((playerPos.y + maxRadius) / spacing) * spacing, WORLD_MAX_Y);
+                int sphereMinZ = (int) Math.floor((playerPos.z - maxRadius) / spacing) * spacing;
+                int sphereMaxZ = (int) Math.ceil((playerPos.z + maxRadius) / spacing) * spacing;
+
+                // Intersect with sphere bounds to avoid calculating outside the LOD range
+                minX = Math.max(minX, sphereMinX);
+                maxX = Math.min(maxX, sphereMaxX);
+                minY = Math.max(minY, sphereMinY);
+                maxY = Math.min(maxY, sphereMaxY);
+                minZ = Math.max(minZ, sphereMinZ);
+                maxZ = Math.min(maxZ, sphereMaxZ);
+            }
         } else {
             // No chunk bounds - use sphere bounds (backward compatibility)
+            int sphereMinX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
+            int sphereMaxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
+            int sphereMinY = Math.max((int) Math.floor((playerPos.y - maxRadius) / spacing) * spacing, WORLD_MIN_Y);
+            int sphereMaxY = Math.min((int) Math.ceil((playerPos.y + maxRadius) / spacing) * spacing, WORLD_MAX_Y);
+            int sphereMinZ = (int) Math.floor((playerPos.z - maxRadius) / spacing) * spacing;
+            int sphereMaxZ = (int) Math.ceil((playerPos.z + maxRadius) / spacing) * spacing;
+
             minX = sphereMinX;
             maxX = sphereMaxX;
             minY = sphereMinY;
@@ -869,19 +893,21 @@ public class VoronoiCalculator {
         for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
             for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
                 for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
-                    if (request.id != latestRequestId) {
+                    if (shouldCancelRequest(request)) {
                         return false;
                     }
                     int index = ((ix * yCount) + iy) * zCount + iz;
-                    double dx = x - playerPos.x;
-                    double dy = y - playerPos.y;
-                    double dz = z - playerPos.z;
-                    double distSq = dx * dx + dy * dy + dz * dz;
+                    if (useDistanceFilter) {
+                        double dx = x - playerPos.x;
+                        double dy = y - playerPos.y;
+                        double dz = z - playerPos.z;
+                        double distSq = dx * dx + dy * dy + dz * dz;
 
-                    // Use 3D distance check
-                    if (distSq < (double) minRadius * minRadius || distSq > (double) maxRadius * maxRadius) {
-                        nearestPortalIdx[index] = SKIP_INDEX;
-                        continue;
+                        // Use 3D distance check
+                        if (distSq < (double) minRadius * minRadius || distSq > (double) maxRadius * maxRadius) {
+                            nearestPortalIdx[index] = SKIP_INDEX;
+                            continue;
+                        }
                     }
 
                     int nearest = findNearestPortalIndex(x, y, z, request.currentDim,
@@ -895,7 +921,7 @@ public class VoronoiCalculator {
         for (int x = minX, ix = 0; x <= maxX; x += spacing, ix++) {
             for (int y = minY, iy = 0; y <= maxY; y += spacing, iy++) {
                 for (int z = minZ, iz = 0; z <= maxZ; z += spacing, iz++) {
-                    if (request.id != latestRequestId) {
+                    if (shouldCancelRequest(request)) {
                         return false;
                     }
                     int index = ((ix * yCount) + iy) * zCount + iz;
@@ -909,19 +935,19 @@ public class VoronoiCalculator {
                         int neighborIdx = ((ix + 1) * yCount + iy) * zCount + iz;
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x + spacing, y, z, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders, lodLevel);
                     }
                     if (iy + 1 < yCount) {
                         int neighborIdx = (ix * yCount + (iy + 1)) * zCount + iz;
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y + spacing, z, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders, lodLevel);
                     }
                     if (iz + 1 < zCount) {
                         int neighborIdx = (ix * yCount + iy) * zCount + (iz + 1);
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y, z + spacing, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders);
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders, lodLevel);
                     }
                 }
             }
@@ -969,17 +995,17 @@ public class VoronoiCalculator {
         }
 
         // Get LOD spacing
-        int spacing = LOD_SPACING[lodLevel];
+        int spacing = getSpacingForLod(lodLevel);
 
         // Get LOD radii to determine minRadius and maxRadius for this LOD level
         int[] lodRadii = buildLodRadii(PortalManager.getInstance().getLod0Distance());
         int maxDistance = calculateMaxDistance(request.portalTranslated, request.playerPos);
 
         int minRadius = 0;
-        int maxRadius = Math.min(lodRadii[lodLevel], maxDistance);
+        int maxRadius = lodLevel < lodRadii.length ? Math.min(lodRadii[lodLevel], maxDistance) : maxDistance;
 
         // Apply overlap for LOD levels > 0
-        if (lodLevel > 0 && spacing > 0) {
+        if (lodLevel > 0 && lodLevel < lodRadii.length && spacing > 0) {
             // Find the maxRadius from the previous LOD level
             for (int i = 0; i < lodLevel; i++) {
                 int prevMaxRadius = Math.min(lodRadii[i], maxDistance);
@@ -997,7 +1023,7 @@ public class VoronoiCalculator {
         // Calculate Voronoi edges within chunk bounds
         boolean success = calculateVoronoiZonesRectangular(
             request, portalX, portalY, portalZ,
-            minRadius, maxRadius, spacing, bucketMap,
+            minRadius, maxRadius, spacing, lodLevel, false, bucketMap,
             minX, maxX, minY, maxY, minZ, maxZ);
 
         if (!success) {
@@ -1016,7 +1042,7 @@ public class VoronoiCalculator {
                                              int index1, int index2,
                                              int x1, int y1, int z1, int x2, int y2, int z2, int spacing,
                                              Vec3[] portalCenters, Vector3f[] portalColors,
-                                             boolean showNeutralBorders, boolean showVerticalBorders) {
+                                             boolean showNeutralBorders, boolean showVerticalBorders, int lodLevel) {
         int portal1 = nearestPortalIdx[index1];
         int portal2 = nearestPortalIdx[index2];
 
@@ -1097,33 +1123,33 @@ public class VoronoiCalculator {
         if (Math.abs(direction.x) > 0.1 && Math.abs(direction.y) < 0.1 && Math.abs(direction.z) < 0.1) {
             // Border normal along X axis - draw lines along Y and Z
             addSegmentToBucket(bucketMap, center.x, center.y + minA, center.z + minA, center.x, center.y + maxA, center.z + minA,
-                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x, center.y + minA, center.z + maxA, center.x, center.y + maxA, center.z + maxA,
-                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x, center.y + minA, center.z + minA, center.x, center.y + minA, center.z + maxA,
-                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x, center.y + maxA, center.z + minA, center.x, center.y + maxA, center.z + maxA,
-                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
         } else if (Math.abs(direction.y) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.z) < 0.1) {
             // Border normal along Y axis - draw lines along X and Z
             addSegmentToBucket(bucketMap, center.x + minA, center.y, center.z + minA, center.x + maxA, center.y, center.z + minA,
-                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x + minA, center.y, center.z + maxA, center.x + maxA, center.y, center.z + maxA,
-                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x + minA, center.y, center.z + minA, center.x + minA, center.y, center.z + maxA,
-                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x + maxA, center.y, center.z + minA, center.x + maxA, center.y, center.z + maxA,
-                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
         } else if (Math.abs(direction.z) > 0.1 && Math.abs(direction.x) < 0.1 && Math.abs(direction.y) < 0.1) {
             // Border normal along Z axis - draw lines along X and Y
             addSegmentToBucket(bucketMap, center.x + minA, center.y + minA, center.z, center.x + maxA, center.y + minA, center.z,
-                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 0, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x + minA, center.y + maxA, center.z, center.x + maxA, center.y + maxA, center.z,
-                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 1, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x + minA, center.y + minA, center.z, center.x + minA, center.y + maxA, center.z,
-                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 2, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
             addSegmentToBucket(bucketMap, center.x + maxA, center.y + minA, center.z, center.x + maxA, center.y + maxA, center.z,
-                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index);
+                spacing, 3, primaryColor, secondaryColor, portal1Index, portal2Index, lodLevel);
         }
     }
 
@@ -1133,7 +1159,7 @@ public class VoronoiCalculator {
     private void addSegmentToBucket(java.util.Map<BucketKey, EdgeBucket> bucketMap,
                                     double x1, double y1, double z1, double x2, double y2, double z2,
                                     int spacing, int group, Vector3f primaryColor, Vector3f secondaryColor,
-                                    int portal1Index, int portal2Index) {
+                                    int portal1Index, int portal2Index, int lodLevel) {
         // Create segment positions
         Vec3 start = new Vec3(x1, y1, z1);
         Vec3 end = new Vec3(x2, y2, z2);
@@ -1144,7 +1170,7 @@ public class VoronoiCalculator {
             k -> new EdgeBucket(primaryColor, secondaryColor, portal1Index, portal2Index, group));
 
         // Add segment to bucket
-        bucket.addSegment(start, end, spacing);
+        bucket.addSegment(start, end, spacing, lodLevel);
     }
 
 
@@ -1154,13 +1180,8 @@ public class VoronoiCalculator {
      */
     private static boolean shouldRenderSegment(EdgeSegment segment, Vec3 camPos, int group,
                                                PortalManager.LineRenderPreset preset, long phase,
-                                               int lod0Distance) {
+                                               int lod0Distance, int[] lodRadii) {
         // LOD 0 (spacing == 1) always renders every line
-        if (segment.alwaysRender) {
-            return true;
-        }
-
-        // Check border draw distance
         double maxBorderDistance = PortalManager.getInstance().getBorderDrawDistance();
         double midX = (segment.start.x + segment.end.x) * 0.5;
         double midY = (segment.start.y + segment.end.y) * 0.5;
@@ -1169,14 +1190,20 @@ public class VoronoiCalculator {
         double dy = midY - camPos.y;
         double dz = midZ - camPos.z;
         double distSq = dx * dx + dy * dy + dz * dz;
+        double distance = Math.sqrt(distSq);
+
+        if (!isSegmentInLodRange(segment, distance, lodRadii)) {
+            return false;
+        }
+
+        if (segment.alwaysRender) {
+            return true;
+        }
 
         // Don't render if beyond border draw distance
         if (distSq > maxBorderDistance * maxBorderDistance) {
             return false;
         }
-
-        // Calculate distance for LOD decisions
-        double distance = Math.sqrt(distSq);
 
         // Apply preset-based rendering logic
         switch (preset) {
@@ -1316,10 +1343,44 @@ public class VoronoiCalculator {
 
     private void queueRecalc(RecalcRequest request) {
         synchronized (recalcLock) {
-            latestRequestId = request.id;
             pendingRequest = request;
+            latestQueuedRequest = request;
             recalcLock.notify();
         }
+    }
+
+    private static boolean isSegmentInLodRange(EdgeSegment segment, double distance, int[] lodRadii) {
+        if (segment.lodLevel <= 0) {
+            return distance <= lodRadii[0];
+        }
+        if (segment.lodLevel < lodRadii.length) {
+            return distance > lodRadii[segment.lodLevel - 1]
+                && distance <= lodRadii[segment.lodLevel];
+        }
+        return distance > lodRadii[lodRadii.length - 1];
+    }
+
+    private boolean shouldCancelRequest(RecalcRequest request) {
+        RecalcRequest latest = latestQueuedRequest;
+        if (latest == null || latest.id == request.id) {
+            return false;
+        }
+        if (!latest.currentDim.equals(request.currentDim)) {
+            return true;
+        }
+        if (!latest.sourceDim.equals(request.sourceDim)) {
+            return true;
+        }
+        if (latest.simulateHeld != request.simulateHeld) {
+            return true;
+        }
+        if (latest.useLinkingAlgorithm != request.useLinkingAlgorithm) {
+            return true;
+        }
+        if (latest.showNeutralBorders != request.showNeutralBorders) {
+            return true;
+        }
+        return latest.showVerticalBorders != request.showVerticalBorders;
     }
 
     private static ResourceKey<Level> getSourceDimension(ResourceKey<Level> currentDim) {

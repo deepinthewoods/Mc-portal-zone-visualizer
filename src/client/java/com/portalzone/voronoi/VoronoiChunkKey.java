@@ -37,7 +37,7 @@ public final class VoronoiChunkKey {
     public final int chunkZ;
 
     /**
-     * Level of Detail (0, 1, or 2 based on LOD_SPACING array)
+     * Level of Detail (0-3 based on LOD_SPACING array; 3 is the final LOD band)
      * <ul>
      *   <li>LOD 0: spacing = 1 (highest detail, closest to player)</li>
      *   <li>LOD 1: spacing = 4 (medium detail)</li>
@@ -63,7 +63,7 @@ public final class VoronoiChunkKey {
      * @param chunkX Chunk X coordinate
      * @param chunkY Chunk Y coordinate
      * @param chunkZ Chunk Z coordinate
-     * @param lodLevel Level of detail (0-2)
+     * @param lodLevel Level of detail (0-3)
      * @param portalConfigHash Hash of portal configuration
      */
     public VoronoiChunkKey(int chunkX, int chunkY, int chunkZ, int lodLevel, long portalConfigHash) {

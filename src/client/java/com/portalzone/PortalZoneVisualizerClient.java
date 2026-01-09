@@ -4,6 +4,7 @@ import com.portalzone.gui.PortalManagementScreen;
 import com.portalzone.portal.PortalManager;
 import com.portalzone.render.PortalRenderer;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
@@ -87,6 +88,11 @@ public class PortalZoneVisualizerClient implements ClientModInitializer {
                 manager.tick();
             }
         });
+
+        ClientChunkEvents.CHUNK_LOAD.register((level, chunk) ->
+            PortalManager.getInstance().handleChunkLoad(level, chunk));
+        ClientChunkEvents.CHUNK_UNLOAD.register((level, chunk) ->
+            PortalManager.getInstance().handleChunkUnload(level.dimension(), chunk.getPos()));
 
         // Clear portals only after fully disconnecting from a world/server
         // Track the last connection state to detect true disconnects
