@@ -38,6 +38,12 @@ public class VoronoiCalculator {
     private static final Vector3f NEUTRAL_ZONE_COLOR = new Vector3f(0.8f, 0.8f, 0.8f);
     private static final int SKIP_INDEX = -2;
 
+    // Chunk cache system
+    private final VoronoiChunkCache chunkCache;
+    private long cachedPortalConfigHash = 0L;
+    private int chunkSize = 128; // Matches TILE_SIZE
+    private int chunkCacheMaxSize = 2000;
+
     // Cached Voronoi edges organized by group (0-3) for efficient batch rendering
     // bucketsByGroup[group] = List of EdgeBucket for that group
     private final AtomicReference<List<EdgeBucket>[]> cachedBuckets =
@@ -57,6 +63,9 @@ public class VoronoiCalculator {
     private volatile long latestRequestId = 0;
 
     private VoronoiCalculator() {
+        // Initialize chunk cache
+        this.chunkCache = new VoronoiChunkCache(chunkCacheMaxSize);
+
         Thread worker = new Thread(this::recalcLoop, "PortalZoneVoronoiWorker");
         worker.setDaemon(true);
         worker.start();
@@ -84,6 +93,17 @@ public class VoronoiCalculator {
         Vec3 playerPos = mc.player != null ? mc.player.position() : camPos;
         ResourceKey<Level> sourceDim = getSourceDimension(currentDim);
         boolean simulateHeld = PortalManager.getInstance().isSimulatePortalHeld();
+
+        // Check for portal configuration changes and invalidate cache if needed
+        checkAndInvalidateCacheIfNeeded(currentDim, sourceDim);
+
+        // Check for dimension change and invalidate cache
+        if (cachedDimension != null && !currentDim.equals(cachedDimension)) {
+            System.out.println("[VoronoiChunk] Dimension changed from " +
+                cachedDimension.location() + " to " + currentDim.location() + ", invalidating cache");
+            chunkCache.invalidateAll();
+            cachedPortalConfigHash = 0L;
+        }
 
         // Recalculate if portals have changed, dimension changed, or player moved significantly
         double recalcDistanceThreshold = getRecalcDistanceThreshold();
@@ -305,7 +325,8 @@ public class VoronoiCalculator {
             // Use rectangular grid for all LODs; spacing scales with distance.
             success = calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxRadius, spacing, bucketMap);
+                effectiveMinRadius, maxRadius, spacing, bucketMap,
+                null, null, null, null, null, null);
 
             if (!success) {
                 return false;
@@ -319,7 +340,8 @@ public class VoronoiCalculator {
             int effectiveMinRadius = Math.max(0, minRadius - spacing);
             if (!calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxDistance, spacing, bucketMap)) {
+                effectiveMinRadius, maxDistance, spacing, bucketMap,
+                null, null, null, null, null, null)) {
                 return false;
             }
         }
@@ -330,6 +352,191 @@ public class VoronoiCalculator {
             + " buckets=" + bucketMap.size()
             + " maxDist=" + maxDistance);
         return true;
+    }
+
+    /**
+     * Recalculate Voronoi borders using the chunk-based caching system.
+     * This method replaces the full recalculation approach with a chunked system that:
+     * - Divides space into fixed-size chunks (128x128x128 blocks)
+     * - Caches calculated chunks with portal configuration hash
+     * - Only recalculates chunks when portal config changes or chunk is newly in range
+     * - Eliminates flickering by merging cached + new chunks before atomic swap
+     *
+     * @param request The recalculation request containing player position and portal data
+     * @param bucketMap The output bucket map to populate with merged chunk data
+     * @return true if calculation succeeded, false if cancelled
+     */
+    private boolean recalculateVoronoiChunked(RecalcRequest request, java.util.Map<BucketKey, EdgeBucket> bucketMap) {
+        int portalCount = request.portalCenters.length;
+        if (portalCount < 2) {
+            return true;
+        }
+
+        long startTime = System.currentTimeMillis();
+
+        // Get current portal configuration hash
+        boolean neutralBorders = PortalManager.getInstance().isNeutralBordersEnabled();
+        long portalConfigHash = PortalConfigHasher.calculatePortalConfigHash(
+            request.portalCenters, request.portalColors,
+            new boolean[request.portalCenters.length], // All visible in request
+            neutralBorders);
+
+        // Calculate dynamic max distance based on portal locations
+        int maxDistance = calculateMaxDistance(request.portalTranslated, request.playerPos);
+        int[] lodRadii = buildLodRadii(PortalManager.getInstance().getLod0Distance());
+
+        // Track statistics
+        int totalChunks = 0;
+        int cacheHits = 0;
+        int cacheMisses = 0;
+
+        // Process each LOD level
+        int minRadius = 0;
+        for (int lodLevel = 0; lodLevel < lodRadii.length; lodLevel++) {
+            int maxRadius = Math.min(lodRadii[lodLevel], maxDistance);
+            if (maxRadius <= minRadius) {
+                continue;
+            }
+
+            // Get required chunks for this LOD level
+            Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
+                request.playerPos, maxRadius, chunkSize);
+
+            System.out.println("[VoronoiChunk] LOD " + lodLevel + ": " + requiredChunks.size() +
+                " chunks in range (radius " + minRadius + "-" + maxRadius + ")");
+
+            // For each required chunk, check cache or calculate
+            for (ChunkCoord chunkCoord : requiredChunks) {
+                // Check for cancellation
+                if (request.id != latestRequestId) {
+                    System.out.println("[VoronoiChunk] Calculation cancelled");
+                    return false;
+                }
+
+                totalChunks++;
+
+                // Create chunk key
+                VoronoiChunkKey key = new VoronoiChunkKey(
+                    chunkCoord.x, chunkCoord.y, chunkCoord.z,
+                    lodLevel, portalConfigHash);
+
+                // Try to get from cache
+                ChunkData cachedData = chunkCache.get(key);
+
+                if (cachedData != null) {
+                    // Cache hit - merge cached data into bucket map
+                    cacheHits++;
+                    mergeChunkIntoBucketMap(cachedData.getBucketMap(), bucketMap);
+                } else {
+                    // Cache miss - calculate chunk
+                    cacheMisses++;
+                    java.util.Map<BucketKey, EdgeBucket> chunkBuckets =
+                        calculateSingleChunk(request, chunkCoord, lodLevel, chunkSize);
+
+                    if (chunkBuckets == null) {
+                        // Calculation was cancelled
+                        return false;
+                    }
+
+                    // Merge into final bucket map
+                    mergeChunkIntoBucketMap(chunkBuckets, bucketMap);
+
+                    // Cache the newly calculated chunk
+                    ChunkData newData = new ChunkData(chunkBuckets);
+                    chunkCache.put(key, newData);
+                }
+            }
+
+            minRadius = maxRadius;
+        }
+
+        // Handle final LOD level beyond configured radii
+        if (minRadius < maxDistance) {
+            int lodLevel = LOD_SPACING.length - 1;
+            Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
+                request.playerPos, maxDistance, chunkSize);
+
+            System.out.println("[VoronoiChunk] Final LOD: " + requiredChunks.size() +
+                " chunks in range (radius " + minRadius + "-" + maxDistance + ")");
+
+            for (ChunkCoord chunkCoord : requiredChunks) {
+                if (request.id != latestRequestId) {
+                    return false;
+                }
+
+                totalChunks++;
+
+                VoronoiChunkKey key = new VoronoiChunkKey(
+                    chunkCoord.x, chunkCoord.y, chunkCoord.z,
+                    lodLevel, portalConfigHash);
+
+                ChunkData cachedData = chunkCache.get(key);
+
+                if (cachedData != null) {
+                    cacheHits++;
+                    mergeChunkIntoBucketMap(cachedData.getBucketMap(), bucketMap);
+                } else {
+                    cacheMisses++;
+                    java.util.Map<BucketKey, EdgeBucket> chunkBuckets =
+                        calculateSingleChunk(request, chunkCoord, lodLevel, chunkSize);
+
+                    if (chunkBuckets == null) {
+                        return false;
+                    }
+
+                    mergeChunkIntoBucketMap(chunkBuckets, bucketMap);
+                    ChunkData newData = new ChunkData(chunkBuckets);
+                    chunkCache.put(key, newData);
+                }
+            }
+        }
+
+        long endTime = System.currentTimeMillis();
+        int totalSegments = bucketMap.values().stream().mapToInt(b -> b.segments.size()).sum();
+        double hitRate = totalChunks > 0 ? (cacheHits * 100.0 / totalChunks) : 0.0;
+
+        System.out.println("[VoronoiChunk] Calculation complete: " +
+            "portals=" + portalCount +
+            ", chunks=" + totalChunks +
+            ", hits=" + cacheHits +
+            ", misses=" + cacheMisses +
+            ", hitRate=" + String.format("%.1f%%", hitRate) +
+            ", segments=" + totalSegments +
+            ", buckets=" + bucketMap.size() +
+            ", time=" + (endTime - startTime) + "ms" +
+            ", " + chunkCache.getStatistics());
+
+        return true;
+    }
+
+    /**
+     * Merges edge buckets from a chunk into the global bucket map.
+     * This combines segments from multiple chunks without duplicates.
+     *
+     * @param chunkBuckets The bucket map from a single chunk
+     * @param globalBuckets The global bucket map to merge into
+     */
+    private void mergeChunkIntoBucketMap(
+            java.util.Map<BucketKey, EdgeBucket> chunkBuckets,
+            java.util.Map<BucketKey, EdgeBucket> globalBuckets) {
+
+        for (java.util.Map.Entry<BucketKey, EdgeBucket> entry : chunkBuckets.entrySet()) {
+            BucketKey key = entry.getKey();
+            EdgeBucket chunkBucket = entry.getValue();
+
+            // Get or create bucket in global map
+            EdgeBucket globalBucket = globalBuckets.computeIfAbsent(key,
+                k -> new EdgeBucket(chunkBucket.primaryColor, chunkBucket.secondaryColor,
+                                   chunkBucket.portal1Index, chunkBucket.portal2Index,
+                                   chunkBucket.group));
+
+            // Add all segments from chunk bucket to global bucket
+            // Note: EdgeBucket.segments is a List, and we're adding all segments
+            // Duplicate detection happens at the edge hashing level during calculation
+            for (EdgeSegment segment : chunkBucket.segments) {
+                globalBucket.segments.add(segment);
+            }
+        }
     }
 
     private static int[] buildLodRadii(int lod0Max) {
@@ -409,6 +616,110 @@ public class VoronoiCalculator {
         lastRequestedSourceDimension = null;
         lastRequestedPlayerPos = null;
         lastRequestedSimulateHeld = false;
+        chunkCache.invalidateAll();
+        cachedPortalConfigHash = 0L;
+    }
+
+    /**
+     * Check if portal configuration has changed and invalidate cache if needed.
+     * This detects changes in:
+     * - Portal positions (add/remove/move)
+     * - Portal colors
+     * - Portal hidden states
+     * - Neutral borders setting
+     */
+    private void checkAndInvalidateCacheIfNeeded(ResourceKey<Level> currentDim, ResourceKey<Level> sourceDim) {
+        PortalManager portalManager = PortalManager.getInstance();
+
+        // Build arrays for hash calculation
+        Set<PortalInfo> sourcePortals = portalManager.getPortalsInDimension(sourceDim);
+        List<PortalInfo> visibleAndHiddenPortals = new ArrayList<>();
+        for (PortalInfo portal : sourcePortals) {
+            visibleAndHiddenPortals.add(portal);
+        }
+
+        // Handle simulate portal held
+        boolean simulateHeld = portalManager.isSimulatePortalHeld();
+        int extraPortals = simulateHeld ? 1 : 0;
+
+        // Build arrays for hash calculation
+        int count = visibleAndHiddenPortals.size() + extraPortals;
+        if (count == 0) {
+            // No portals, hash is 0
+            if (cachedPortalConfigHash != 0L) {
+                System.out.println("[VoronoiChunk] No portals detected, invalidating cache");
+                chunkCache.invalidateAll();
+                cachedPortalConfigHash = 0L;
+            }
+            return;
+        }
+
+        Vec3[] portalPositions = new Vec3[count];
+        Vector3f[] portalColors = new Vector3f[count];
+        boolean[] hiddenStates = new boolean[count];
+
+        int i = 0;
+        for (PortalInfo portal : visibleAndHiddenPortals) {
+            Vec3 pos = sourceDim.equals(currentDim) ? portal.getCenterPos() : portal.getTranslatedPos();
+            portalPositions[i] = pos;
+            portalColors[i] = portalManager.getPortalColor(portal);
+            hiddenStates[i] = portalManager.isPortalHidden(portal);
+            i++;
+        }
+
+        // Add simulated portal if held
+        if (simulateHeld) {
+            Minecraft mc = Minecraft.getInstance();
+            Vec3 playerPos = mc.player != null ? mc.player.position() : Vec3.ZERO;
+            portalPositions[i] = playerPos;
+            portalColors[i] = new Vector3f(1.0f, 1.0f, 1.0f);
+            hiddenStates[i] = false;
+        }
+
+        // Calculate hash
+        boolean neutralBorders = portalManager.isNeutralBordersEnabled();
+        long newHash = PortalConfigHasher.calculatePortalConfigHash(
+            portalPositions, portalColors, hiddenStates, neutralBorders);
+
+        // Check if hash changed
+        if (cachedPortalConfigHash != newHash) {
+            System.out.println("[VoronoiChunk] Portal configuration changed (hash: " +
+                Long.toHexString(cachedPortalConfigHash) + " -> " + Long.toHexString(newHash) +
+                "), invalidating cache");
+            chunkCache.invalidateAll();
+            cachedPortalConfigHash = newHash;
+        }
+    }
+
+    /**
+     * Called by PortalManager when neutral borders setting changes.
+     * Invalidates all cached chunks since border visibility changes.
+     */
+    public void invalidateCacheForNeutralBordersChange() {
+        System.out.println("[VoronoiChunk] Neutral borders setting changed, invalidating cache");
+        chunkCache.invalidateAll();
+        cachedPortalConfigHash = 0L; // Force recalculation of hash
+    }
+
+    /**
+     * Called by PortalManager when vertical borders setting changes.
+     * Invalidates all cached chunks since border visibility changes.
+     */
+    public void invalidateCacheForVerticalBordersChange() {
+        System.out.println("[VoronoiChunk] Vertical borders setting changed, invalidating cache");
+        chunkCache.invalidateAll();
+        cachedPortalConfigHash = 0L; // Force recalculation of hash
+    }
+
+    /**
+     * Called by PortalManager when LOD0 distance changes.
+     * Currently invalidates all chunks. Could be optimized to only invalidate
+     * affected LOD levels in the future.
+     */
+    public void invalidateCacheForLod0DistanceChange() {
+        System.out.println("[VoronoiChunk] LOD0 distance changed, invalidating cache");
+        chunkCache.invalidateAll();
+        cachedPortalConfigHash = 0L; // Force recalculation of hash
     }
 
     /**
@@ -434,7 +745,7 @@ public class VoronoiCalculator {
      * Represents a bucket of edges that share the same portal pair and group
      * This allows us to batch render and calculate color once per bucket
      */
-    private static class EdgeBucket {
+    static class EdgeBucket {
         final List<EdgeSegment> segments;
         final Vector3f primaryColor;
         final Vector3f secondaryColor;
@@ -459,7 +770,7 @@ public class VoronoiCalculator {
     /**
      * Key for identifying unique edge buckets
      */
-    private static class BucketKey {
+    static class BucketKey {
         final int group;
         final int portal1;
         final int portal2;
@@ -488,18 +799,65 @@ public class VoronoiCalculator {
     /**
      * Calculate Voronoi edges using rectangular grid.
      * Adds segments to buckets organized by (group, portal_pair)
+     *
+     * @param chunkMinX Minimum X bound for chunk (null = use sphere bounds)
+     * @param chunkMaxX Maximum X bound for chunk (null = use sphere bounds)
+     * @param chunkMinY Minimum Y bound for chunk (null = use sphere bounds)
+     * @param chunkMaxY Maximum Y bound for chunk (null = use sphere bounds)
+     * @param chunkMinZ Minimum Z bound for chunk (null = use sphere bounds)
+     * @param chunkMaxZ Maximum Z bound for chunk (null = use sphere bounds)
      */
     private boolean calculateVoronoiZonesRectangular(RecalcRequest request,
                                                      double[] portalX, double[] portalY, double[] portalZ,
                                                      int minRadius, int maxRadius, int spacing,
-                                                     java.util.Map<BucketKey, EdgeBucket> bucketMap) {
+                                                     java.util.Map<BucketKey, EdgeBucket> bucketMap,
+                                                     Integer chunkMinX, Integer chunkMaxX,
+                                                     Integer chunkMinY, Integer chunkMaxY,
+                                                     Integer chunkMinZ, Integer chunkMaxZ) {
         Vec3 playerPos = request.playerPos;
-        int minX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
-        int maxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
-        int minY = Math.max((int) Math.floor((playerPos.y - maxRadius) / spacing) * spacing, -64);
-        int maxY = Math.min((int) Math.ceil((playerPos.y + maxRadius) / spacing) * spacing, 320);
-        int minZ = (int) Math.floor((playerPos.z - maxRadius) / spacing) * spacing;
-        int maxZ = (int) Math.ceil((playerPos.z + maxRadius) / spacing) * spacing;
+
+        // Calculate bounds from sphere (old behavior)
+        int sphereMinX = (int) Math.floor((playerPos.x - maxRadius) / spacing) * spacing;
+        int sphereMaxX = (int) Math.ceil((playerPos.x + maxRadius) / spacing) * spacing;
+        int sphereMinY = Math.max((int) Math.floor((playerPos.y - maxRadius) / spacing) * spacing, -64);
+        int sphereMaxY = Math.min((int) Math.ceil((playerPos.y + maxRadius) / spacing) * spacing, 320);
+        int sphereMinZ = (int) Math.floor((playerPos.z - maxRadius) / spacing) * spacing;
+        int sphereMaxZ = (int) Math.ceil((playerPos.z + maxRadius) / spacing) * spacing;
+
+        // If chunk bounds provided, intersect them with sphere bounds and align to spacing
+        int minX, maxX, minY, maxY, minZ, maxZ;
+        if (chunkMinX != null && chunkMaxX != null && chunkMinY != null &&
+            chunkMaxY != null && chunkMinZ != null && chunkMaxZ != null) {
+            // Align chunk bounds to spacing grid
+            minX = (int) Math.floor((double) chunkMinX / spacing) * spacing;
+            maxX = (int) Math.ceil((double) chunkMaxX / spacing) * spacing;
+            minY = (int) Math.floor((double) chunkMinY / spacing) * spacing;
+            maxY = (int) Math.ceil((double) chunkMaxY / spacing) * spacing;
+            minZ = (int) Math.floor((double) chunkMinZ / spacing) * spacing;
+            maxZ = (int) Math.ceil((double) chunkMaxZ / spacing) * spacing;
+
+            // Intersect with sphere bounds to avoid calculating outside the LOD range
+            minX = Math.max(minX, sphereMinX);
+            maxX = Math.min(maxX, sphereMaxX);
+            minY = Math.max(minY, sphereMinY);
+            maxY = Math.min(maxY, sphereMaxY);
+            minZ = Math.max(minZ, sphereMinZ);
+            maxZ = Math.min(maxZ, sphereMaxZ);
+        } else {
+            // No chunk bounds - use sphere bounds (backward compatibility)
+            minX = sphereMinX;
+            maxX = sphereMaxX;
+            minY = sphereMinY;
+            maxY = sphereMaxY;
+            minZ = sphereMinZ;
+            maxZ = sphereMaxZ;
+        }
+
+        // Check if intersection is empty (chunk entirely outside sphere bounds)
+        if (minX > maxX || minY > maxY || minZ > maxZ) {
+            // Chunk is entirely outside the distance range - nothing to calculate
+            return true;
+        }
 
         int xCount = ((maxX - minX) / spacing) + 1;
         int yCount = ((maxY - minY) / spacing) + 1;
@@ -570,6 +928,83 @@ public class VoronoiCalculator {
         }
 
         return true;
+    }
+
+    /**
+     * Calculate Voronoi edges for a single chunk at a specific LOD level.
+     * This is a wrapper around calculateVoronoiZonesRectangular that converts
+     * chunk coordinates to world-space boundaries and sets up the calculation.
+     *
+     * @param request The recalculation request containing portal data
+     * @param chunkCoord The chunk coordinate to calculate
+     * @param lodLevel The LOD level (0, 1, or 2) determining spacing
+     * @param chunkSize The size of the chunk in blocks (typically 128)
+     * @return Map of edge buckets for this chunk, or null if calculation was cancelled
+     */
+    private java.util.Map<BucketKey, EdgeBucket> calculateSingleChunk(
+            RecalcRequest request,
+            ChunkCoord chunkCoord,
+            int lodLevel,
+            int chunkSize) {
+
+        // Get world-space bounds for this chunk
+        int[] bounds = ChunkBoundaryCalculator.getChunkBounds(chunkCoord, chunkSize);
+        int minX = bounds[0];
+        int maxX = bounds[1];
+        int minY = bounds[2];
+        int maxY = bounds[3];
+        int minZ = bounds[4];
+        int maxZ = bounds[5];
+
+        // Prepare portal position arrays
+        int portalCount = request.portalCenters.length;
+        double[] portalX = new double[portalCount];
+        double[] portalY = new double[portalCount];
+        double[] portalZ = new double[portalCount];
+        for (int i = 0; i < portalCount; i++) {
+            Vec3 portalPos = request.portalCenters[i];
+            portalX[i] = portalPos.x;
+            portalY[i] = portalPos.y;
+            portalZ[i] = portalPos.z;
+        }
+
+        // Get LOD spacing
+        int spacing = LOD_SPACING[lodLevel];
+
+        // Get LOD radii to determine minRadius and maxRadius for this LOD level
+        int[] lodRadii = buildLodRadii(PortalManager.getInstance().getLod0Distance());
+        int maxDistance = calculateMaxDistance(request.portalTranslated, request.playerPos);
+
+        int minRadius = 0;
+        int maxRadius = Math.min(lodRadii[lodLevel], maxDistance);
+
+        // Apply overlap for LOD levels > 0
+        if (lodLevel > 0 && spacing > 0) {
+            // Find the maxRadius from the previous LOD level
+            for (int i = 0; i < lodLevel; i++) {
+                int prevMaxRadius = Math.min(lodRadii[i], maxDistance);
+                if (prevMaxRadius > minRadius) {
+                    minRadius = prevMaxRadius;
+                }
+            }
+            // Extend inward by one spacing unit for overlap
+            minRadius = Math.max(0, minRadius - spacing);
+        }
+
+        // Create bucket map for this chunk
+        java.util.Map<BucketKey, EdgeBucket> bucketMap = new java.util.HashMap<>();
+
+        // Calculate Voronoi edges within chunk bounds
+        boolean success = calculateVoronoiZonesRectangular(
+            request, portalX, portalY, portalZ,
+            minRadius, maxRadius, spacing, bucketMap,
+            minX, maxX, minY, maxY, minZ, maxZ);
+
+        if (!success) {
+            return null; // Calculation was cancelled
+        }
+
+        return bucketMap;
     }
 
     /**
@@ -955,15 +1390,16 @@ public class VoronoiCalculator {
                 pendingRequest = null;
             }
 
-            // Create bucket map and perform calculation
+            // Create bucket map and perform calculation using chunked approach
+            // Old data stays visible in cachedBuckets until calculation is complete
             java.util.Map<BucketKey, EdgeBucket> bucketMap = new java.util.HashMap<>();
-            cachedBuckets.set(createEmptyBuckets());
-            cachedDimension = request.currentDim;
-            cachedSourceDimension = request.sourceDim;
-            cachedPlayerPos = request.playerPos;
-            cachedSimulateHeld = request.simulateHeld;
 
-            if (!recalculateVoronoi(request, bucketMap)) {
+            // Use the new chunked calculation approach
+            boolean success = recalculateVoronoiChunked(request, bucketMap);
+
+            if (!success) {
+                // Calculation was cancelled - don't update cache
+                System.out.println("[VoronoiChunk] Recalculation cancelled, keeping old data visible");
                 continue;
             }
 
@@ -973,12 +1409,15 @@ public class VoronoiCalculator {
                 bucketsByGroup[bucket.group].add(bucket);
             }
 
-            // Update cache
+            // Atomic swap - update all cached data at once
+            // This ensures no flickering: old data visible until new data ready
             cachedBuckets.set(bucketsByGroup);
             cachedDimension = request.currentDim;
             cachedSourceDimension = request.sourceDim;
             cachedPlayerPos = request.playerPos;
             cachedSimulateHeld = request.simulateHeld;
+
+            System.out.println("[VoronoiChunk] Recalculation complete, new data now visible");
         }
     }
 

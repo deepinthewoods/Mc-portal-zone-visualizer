@@ -688,6 +688,8 @@ public class PortalManager {
         }
         this.showNeutralBorders = enabled;
         portalsChanged = true;
+        // Invalidate chunk cache since neutral borders affect border visibility
+        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForNeutralBordersChange();
         saveSettingsNow();
     }
 
@@ -707,6 +709,8 @@ public class PortalManager {
         }
         this.showVerticalBorders = enabled;
         portalsChanged = true;
+        // Invalidate chunk cache since vertical borders affect border visibility
+        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForVerticalBordersChange();
         saveSettingsNow();
     }
 
@@ -770,6 +774,8 @@ public class PortalManager {
             return;
         }
         this.lod0Distance = clamped;
+        // Invalidate chunk cache since LOD0 distance affects which chunks are calculated
+        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForLod0DistanceChange();
         saveSettingsNow();
     }
 
