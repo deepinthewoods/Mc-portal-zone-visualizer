@@ -30,8 +30,8 @@ public class VoronoiCalculator {
 
     // LOD (Level of Detail) constants
     private static final int MAX_BORDER_DISTANCE = 2048; // Increase to render farther borders.
-    private static final int[] BASE_LOD_RADII = new int[] {256, 1024};
-    private static final int[] LOD_SPACING = new int[] {1, 4, 16};
+    private static final int[] BASE_LOD_RADII = new int[] {256, 512, 700};
+    private static final int[] LOD_SPACING = new int[] {1, 4, 16, 64};
     private static final int TILE_SIZE = 128;
     private static final int WORLD_MIN_Y = -64;
     private static final int WORLD_MAX_Y = 320;
@@ -595,7 +595,9 @@ public class VoronoiCalculator {
             return nearestIndex;
         }
 
-        // Compare in current dimension coordinates with current dimension's search radius
+        // Compare in current dimension coordinates
+        // The portals are already translated to current dimension coordinates
+        // Use the current dimension's search radius for portal linking
         Vec3 sourcePos = new Vec3(x, y, z);
         int searchRadius = PortalLinkingAlgorithm.getSearchRadius(currentDim);
 

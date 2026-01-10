@@ -1,5 +1,6 @@
 package com.portalzone.render;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
@@ -41,6 +42,12 @@ public class PortalRenderer {
     private static final RenderType MARKER_LINES_NO_DEPTH = createLines(false, MARKER_LINE_WIDTH, "portal_zone_marker_lines_no_depth");
     private static final List<LabelEntry> LABELS = new ArrayList<>();
 
+    // Line counting for performance monitoring
+    private static int lineCountThisFrame = 0;
+    private static int totalLineCount = 0;
+    private static int frameCount = 0;
+    private static long lastReportTime = System.currentTimeMillis();
+
     public static void render(PoseStack matrices, Camera camera, MultiBufferSource bufferSource) {
         // Check if rendering is enabled
         if (!PortalZoneVisualizerClient.isRenderingEnabled()) {
@@ -51,6 +58,9 @@ public class PortalRenderer {
         if (mc.level == null || mc.player == null) {
             return;
         }
+
+        // Reset line count for this frame
+        lineCountThisFrame = 0;
 
         // Get camera position
         Vec3 camPos = camera.getPosition();
@@ -86,6 +96,24 @@ public class PortalRenderer {
             renderPortalMarker(matrices, bufferSource, camPos, portal, translatedPos, currentDim,
                 camera, portalMarkersUseDepth);
         }
+
+        // Update line count statistics and report every 2 seconds
+        totalLineCount += lineCountThisFrame;
+        frameCount++;
+
+        long currentTime = System.currentTimeMillis();
+        long elapsedTime = currentTime - lastReportTime;
+
+        if (elapsedTime >= 2000) { // 2 seconds = 2000 milliseconds
+            double averageLinesPerFrame = frameCount > 0 ? (double) totalLineCount / frameCount : 0.0;
+            System.out.println(String.format("[PortalRenderer] Lines per frame: %.2f (total: %d, frames: %d, period: %.2fs)",
+                averageLinesPerFrame, totalLineCount, frameCount, elapsedTime / 1000.0));
+
+            // Reset counters
+            totalLineCount = 0;
+            frameCount = 0;
+            lastReportTime = currentTime;
+        }
     }
 
     /**
@@ -109,7 +137,7 @@ public class PortalRenderer {
         float halfWidth = portal.width * 0.5f;
         float halfHeight = portal.height * 0.5f;
         Vec2 markerHalfSize = ensureMinimumScreenSize(distance, halfWidth, halfHeight);
-
+        RenderSystem.setShaderFog();
         // Get color
         Vector3f color = manager.isPortalHidden(portal)
             ? HIDDEN_PORTAL_COLOR
@@ -294,6 +322,8 @@ public class PortalRenderer {
                                    float r, float g, float b, float a, int light,
                                    double ax, double ay, double az, double bx, double by, double bz,
                                    Vector3f normal, boolean useDepthTest) {
+        lineCountThisFrame++; // Count this line
+
         RenderType renderType = useDepthTest ? LINES_DEPTH : LINES_NO_DEPTH;
         VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
         Matrix4f pose = matrices.last().pose();
@@ -319,6 +349,8 @@ public class PortalRenderer {
                                    float r, float g, float b, float a, int light,
                                    double ax, double ay, double az, double bx, double by, double bz,
                                    Vector3f normal, boolean useDepthTest) {
+        lineCountThisFrame++; // Count this line
+
         RenderType renderType = useDepthTest ? MARKER_LINES_DEPTH : MARKER_LINES_NO_DEPTH;
         VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
         Matrix4f pose = matrices.last().pose();
