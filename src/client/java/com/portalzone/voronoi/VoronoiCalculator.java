@@ -1183,32 +1183,39 @@ public class VoronoiCalculator {
     /**
      * Compute a pseudo-random group (0-3) based on line segment coordinates and portal indices.
      * This creates a more organic distribution of groups rather than geometric patterns.
+     * Uses a deterministic hash so each line always gets the same group (no flickering).
      */
     private static int computePseudoRandomGroup(Vec3 start, Vec3 end, int portal1, int portal2, int geometricGroup) {
-        // Use FNV-1a hash algorithm for good distribution
-        int hash = 0x811c9dc5;
+        // Hash both endpoints for better distribution
+        int x1 = (int) Math.floor(start.x);
+        int y1 = (int) Math.floor(start.y);
+        int z1 = (int) Math.floor(start.z);
+        int x2 = (int) Math.floor(end.x);
+        int y2 = (int) Math.floor(end.y);
+        int z2 = (int) Math.floor(end.z);
 
-        // Hash the midpoint coordinates (more stable than individual endpoints)
-        int midX = (int) start.x;
-        int midY = (int) start.y;
-        int midZ = (int) start.z;
+        // Use a strong mixing function (based on MurmurHash3's finalizer)
+        // This creates more random-looking patterns than FNV-1a
+        long hash = 0;
+        hash = hash * 31 + x1;
+        hash = hash * 31 + y1;
+        hash = hash * 31 + z1;
+        hash = hash * 31 + x2;
+        hash = hash * 31 + y2;
+        hash = hash * 31 + z2;
+        hash = hash * 31 + portal1;
+        hash = hash * 31 + portal2;
+        hash = hash * 31 + geometricGroup;
 
-        hash = (hash ^ quantize(midX)) * 0x01000193;
-        hash = (hash ^ quantize(midY)) * 0x01000193;
-        hash = (hash ^ quantize(midZ)) * 0x01000193;
-
-        // Include portal indices to vary groups across different borders
-        hash = (hash ^ portal1) * 0x01000193;
-        hash = (hash ^ portal2) * 0x01000193;
-
-        // Include geometric group to ensure distribution across all 4 groups
-        // This prevents all lines from ending up in the same bin
-        hash = (hash ^ geometricGroup) * 0x01000193;
-
-        hash = midX * 37 + midY * 97 + midZ * 43;
+        // MurmurHash3 finalizer - provides excellent bit mixing
+        hash ^= hash >>> 33;
+        hash *= 0xff51afd7ed558ccdL;
+        hash ^= hash >>> 33;
+        hash *= 0xc4ceb9fe1a85ec53L;
+        hash ^= hash >>> 33;
 
         // Map to group 0-3
-        return (int) (Math.random()* 4);//Math.abs(hash) % 4;
+        return (int) (Math.abs(hash) % 4);
     }
 
 
