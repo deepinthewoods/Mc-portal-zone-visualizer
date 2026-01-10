@@ -2,6 +2,7 @@ package com.portalzone.render;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
+import org.lwjgl.opengl.GL11;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.platform.DepthTestFunction;
@@ -75,6 +76,16 @@ public class PortalRenderer {
         boolean portalMarkersAlwaysVisible = PortalManager.getInstance().isPortalMarkersAlwaysVisible();
         boolean portalMarkersUseDepth = !portalMarkersAlwaysVisible;
 
+        // If markers should always be visible, flush borders first then manipulate depth range
+        if (portalMarkersAlwaysVisible) {
+            // Flush border buffers before changing depth range
+            if (bufferSource instanceof MultiBufferSource.BufferSource source) {
+                source.endBatch(LINES_DEPTH);
+                source.endBatch(LINES_NO_DEPTH);
+            }
+            GL11.glDepthRange(0.0, 0.01);
+        }
+
         // Render portals in current dimension
         Set<PortalInfo> currentDimPortals = PortalManager.getInstance().getPortalsInDimension(currentDim);
         for (PortalInfo portal : currentDimPortals) {
@@ -96,6 +107,16 @@ public class PortalRenderer {
             Vec3 translatedPos = portal.getTranslatedPos();
             renderPortalMarker(matrices, bufferSource, camPos, portal, translatedPos, currentDim,
                 camera, portalMarkersUseDepth);
+        }
+
+        // Restore normal depth range if it was modified
+        if (portalMarkersAlwaysVisible) {
+            // Flush marker buffers before restoring depth range
+            if (bufferSource instanceof MultiBufferSource.BufferSource source) {
+                source.endBatch(MARKER_LINES_DEPTH);
+                source.endBatch(MARKER_LINES_NO_DEPTH);
+            }
+            GL11.glDepthRange(0.0, 1.0);
         }
 
         // Update line count statistics and report every 2 seconds
