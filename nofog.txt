@@ -1,0 +1,16 @@
+private static final RenderLayer LINES_NO_FOG = RenderLayer.of(
+        "lines_no_fog",
+        VertexFormats.POSITION_COLOR,
+        VertexFormat.DrawMode.LINES,
+        256,
+        false,
+        false,
+        RenderLayer.MultiPhaseParameters.builder()
+            .program(RenderPhase.LINES_PROGRAM)
+            .lineWidth(new RenderPhase.LineWidth(OptionalDouble.empty()))
+            .layering(RenderPhase.VIEW_OFFSET_Z_LAYERING)
+            .transparency(RenderPhase.TRANSLUCENT_TRANSPARENCY)
+            .writeMaskState(RenderPhase.ALL_MASK)
+            // No fog phase!
+            .build(false)
+    );

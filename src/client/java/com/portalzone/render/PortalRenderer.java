@@ -17,6 +17,7 @@ import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -137,7 +138,7 @@ public class PortalRenderer {
         float halfWidth = portal.width * 0.5f;
         float halfHeight = portal.height * 0.5f;
         Vec2 markerHalfSize = ensureMinimumScreenSize(distance, halfWidth, halfHeight);
-        RenderSystem.setShaderFog();
+
         // Get color
         Vector3f color = manager.isPortalHidden(portal)
             ? HIDDEN_PORTAL_COLOR
@@ -407,10 +408,16 @@ public class PortalRenderer {
     }
 
     private static RenderType createLines(boolean useDepthTest, float lineWidth, String name) {
-        RenderPipeline.Builder pipelineBuilder = RenderPipeline.builder(RenderPipelines.LINES_SNIPPET)
+        RenderPipeline.Builder pipelineBuilder = RenderPipeline.builder(RenderPipelines.MATRICES_PROJECTION_SNIPPET, RenderPipelines.GLOBALS_SNIPPET)
+            .withVertexShader(ResourceLocation.parse("portal-zone-visualizer:core/portal_lines"))
+            .withFragmentShader(ResourceLocation.parse("portal-zone-visualizer:core/portal_lines"))
+            .withVertexFormat(com.mojang.blaze3d.vertex.DefaultVertexFormat.POSITION_COLOR_NORMAL, com.mojang.blaze3d.vertex.VertexFormat.Mode.LINES)
             .withLocation(useDepthTest
                 ? "pipeline/" + name
-                : "pipeline/" + name);
+                : "pipeline/" + name)
+            .withBlend(com.mojang.blaze3d.pipeline.BlendFunction.TRANSLUCENT)
+            .withCull(false)
+            .withColorWrite(true);
 
         if (!useDepthTest) {
             pipelineBuilder.withDepthTestFunction(DepthTestFunction.NO_DEPTH_TEST)
