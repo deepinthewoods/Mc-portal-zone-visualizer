@@ -83,7 +83,6 @@ public class PortalManager {
     private boolean portalMarkersAlwaysVisible = true; // Default: always visible
     private boolean bordersAlwaysVisible = false; // Default: respect occlusion
     private boolean showNeutralBorders = true; // Default: show grey borders
-    private boolean showVerticalBorders = false; // Default: no vertical border lines
     private float minimumMarkerScreenPercent = 2.0f; // Default: 2% of long screen side
     private LineRenderPreset lineRenderPreset = LineRenderPreset.FULL; // Default: render all lines
     private int lod0Distance = 64; // Default: LOD 0 radius in blocks
@@ -848,26 +847,6 @@ public class PortalManager {
         return showNeutralBorders;
     }
 
-    /**
-     * Set whether vertical border lines should be rendered
-     */
-    public void setVerticalBordersEnabled(boolean enabled) {
-        if (this.showVerticalBorders == enabled) {
-            return;
-        }
-        this.showVerticalBorders = enabled;
-        portalsChanged = true;
-        // Invalidate chunk cache since vertical borders affect border visibility
-        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForVerticalBordersChange();
-        saveSettingsNow();
-    }
-
-    /**
-     * Get whether vertical border lines should be rendered
-     */
-    public boolean isVerticalBordersEnabled() {
-        return showVerticalBorders;
-    }
 
     /**
      * Set the minimum portal marker screen size (percent of long screen side)
@@ -1085,9 +1064,6 @@ public class PortalManager {
             if (root.has("showNeutralBorders")) {
                 showNeutralBorders = root.get("showNeutralBorders").getAsBoolean();
             }
-            if (root.has("showVerticalBorders")) {
-                showVerticalBorders = root.get("showVerticalBorders").getAsBoolean();
-            }
             if (root.has("minimumMarkerScreenPercent")) {
                 setMinimumMarkerScreenPercent(root.get("minimumMarkerScreenPercent").getAsFloat());
             }
@@ -1225,7 +1201,6 @@ public class PortalManager {
         root.addProperty("portalMarkersAlwaysVisible", portalMarkersAlwaysVisible);
         root.addProperty("bordersAlwaysVisible", bordersAlwaysVisible);
         root.addProperty("showNeutralBorders", showNeutralBorders);
-        root.addProperty("showVerticalBorders", showVerticalBorders);
         root.addProperty("minimumMarkerScreenPercent", minimumMarkerScreenPercent);
         root.addProperty("lineRenderPreset", lineRenderPreset.name());
         root.addProperty("lod0Distance", lod0Distance);

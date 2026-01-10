@@ -217,7 +217,7 @@ public class VoronoiCalculator {
                     Vector3f color = selectBucketColor(bucket, nearestPortalIndex, gameTime, isLod0);
 
                     PortalRenderer.submitLine(matrices, bufferSource,
-                        color.x, color.y, color.z, 0.6f,
+                        color.x, color.y, color.z, 1.0f,
                         0x00F000F0,
                         segment.start.x, segment.start.y, segment.start.z,
                         segment.end.x, segment.end.y, segment.end.z,
@@ -818,15 +818,6 @@ public class VoronoiCalculator {
         cachedPortalConfigHash = 0L; // Force recalculation of hash
     }
 
-    /**
-     * Called by PortalManager when vertical borders setting changes.
-     * Invalidates all cached chunks since border visibility changes.
-     */
-    public void invalidateCacheForVerticalBordersChange() {
-        System.out.println("[VoronoiChunk] Vertical borders setting changed, invalidating cache");
-        chunkCache.invalidateAll();
-        cachedPortalConfigHash = 0L; // Force recalculation of hash
-    }
 
     /**
      * Called by PortalManager when LOD0 distance changes.
@@ -1039,19 +1030,19 @@ public class VoronoiCalculator {
                         int neighborIdx = ((ix + 1) * yCount + iy) * zCount + iz;
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x + spacing, y, z, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders, lodLevel);
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, lodLevel);
                     }
                     if (iy + 1 < yCount) {
                         int neighborIdx = (ix * yCount + (iy + 1)) * zCount + iz;
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y + spacing, z, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders, lodLevel);
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, lodLevel);
                     }
                     if (iz + 1 < zCount) {
                         int neighborIdx = (ix * yCount + iy) * zCount + (iz + 1);
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y, z + spacing, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, request.showVerticalBorders, lodLevel);
+                            request.portalCenters, request.portalColors, request.showNeutralBorders, lodLevel);
                     }
                 }
             }
@@ -1146,7 +1137,7 @@ public class VoronoiCalculator {
                                              int index1, int index2,
                                              int x1, int y1, int z1, int x2, int y2, int z2, int spacing,
                                              Vec3[] portalCenters, Vector3f[] portalColors,
-                                             boolean showNeutralBorders, boolean showVerticalBorders, int lodLevel) {
+                                             boolean showNeutralBorders, int lodLevel) {
         int portal1 = nearestPortalIdx[index1];
         int portal2 = nearestPortalIdx[index2];
 
@@ -1165,11 +1156,6 @@ public class VoronoiCalculator {
 
         // Direction from one grid point to the other (perpendicular to the border surface)
         Vec3 borderNormal = direction.normalize();
-
-        // Check if this is a vertical edge (for the vertical borders checkbox)
-        if (Math.abs(borderNormal.y) > 0.9 && !showVerticalBorders) {
-            return;
-        }
 
         // Determine colors
         Vector3f color1, color2;
@@ -1217,6 +1203,7 @@ public class VoronoiCalculator {
         }
 
         // Draw grid lines aligned with axes, centered on the border plane.
+        // With alpha=1.0, overlapping is fine - 4 segments provide better coverage
         Vec3 center = midpoint;
         double halfSpacing = spacing * 0.5;
         double minA = -halfSpacing;
@@ -1524,10 +1511,7 @@ public class VoronoiCalculator {
         if (latest.useLinkingAlgorithm != request.useLinkingAlgorithm) {
             return true;
         }
-        if (latest.showNeutralBorders != request.showNeutralBorders) {
-            return true;
-        }
-        return latest.showVerticalBorders != request.showVerticalBorders;
+        return latest.showNeutralBorders != request.showNeutralBorders;
     }
 
     private static ResourceKey<Level> getSourceDimension(ResourceKey<Level> currentDim) {
@@ -1554,7 +1538,6 @@ public class VoronoiCalculator {
         }
 
         boolean showNeutralBorders = portalManager.isNeutralBordersEnabled();
-        boolean showVerticalBorders = portalManager.isVerticalBordersEnabled();
         boolean useLinkingAlgorithm = !sourceDim.equals(currentDim);
 
         int count = visiblePortals.size() + extraPortals;
@@ -1579,7 +1562,7 @@ public class VoronoiCalculator {
 
         long id = requestId.incrementAndGet();
         return new RecalcRequest(id, playerPos, currentDim, sourceDim, simulateHeld,
-            centers, translated, colors, showNeutralBorders, showVerticalBorders, useLinkingAlgorithm);
+            centers, translated, colors, showNeutralBorders, useLinkingAlgorithm);
     }
 
     private void recalcLoop() {
@@ -1639,13 +1622,12 @@ public class VoronoiCalculator {
         final Vec3[] portalTranslated;
         final Vector3f[] portalColors;
         final boolean showNeutralBorders;
-        final boolean showVerticalBorders;
         final boolean useLinkingAlgorithm;
 
         RecalcRequest(long id, Vec3 playerPos, ResourceKey<Level> currentDim,
                       ResourceKey<Level> sourceDim, boolean simulateHeld,
                       Vec3[] portalCenters, Vec3[] portalTranslated, Vector3f[] portalColors,
-                      boolean showNeutralBorders, boolean showVerticalBorders, boolean useLinkingAlgorithm) {
+                      boolean showNeutralBorders, boolean useLinkingAlgorithm) {
             this.id = id;
             this.playerPos = playerPos;
             this.currentDim = currentDim;
@@ -1655,7 +1637,6 @@ public class VoronoiCalculator {
             this.portalTranslated = portalTranslated;
             this.portalColors = portalColors;
             this.showNeutralBorders = showNeutralBorders;
-            this.showVerticalBorders = showVerticalBorders;
             this.useLinkingAlgorithm = useLinkingAlgorithm;
         }
     }

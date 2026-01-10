@@ -124,19 +124,6 @@ public class PortalManagementScreen extends BaseScreen {
         neutralBordersCheckbox.setChecked(manager.isNeutralBordersEnabled());
         neutralBordersCheckbox.setListener((checkBox) -> manager.setNeutralBordersEnabled(checkBox.isChecked()));
         this.addWidget(neutralBordersCheckbox);
-        y += 15;
-
-        // Vertical borders checkbox
-        WidgetCheckBox verticalBordersCheckbox = new WidgetCheckBox(
-            x,
-            y,
-            MaLiLibIcons.MINUS,
-            MaLiLibIcons.PLUS,
-            "Show Vertical Borders"
-        );
-        verticalBordersCheckbox.setChecked(manager.isVerticalBordersEnabled());
-        verticalBordersCheckbox.setListener((checkBox) -> manager.setVerticalBordersEnabled(checkBox.isChecked()));
-        this.addWidget(verticalBordersCheckbox);
 
         // Minimum marker size slider
         y += 20;
