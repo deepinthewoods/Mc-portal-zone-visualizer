@@ -585,6 +585,7 @@ public class VoronoiCalculator {
     /**
      * Merges edge buckets from a chunk into the global bucket map.
      * This combines segments from multiple chunks without duplicates.
+     * Set.addAll() automatically deduplicates based on EdgeSegment.equals() (hash comparison).
      *
      * @param chunkBuckets The bucket map from a single chunk
      * @param globalBuckets The global bucket map to merge into
@@ -604,11 +605,8 @@ public class VoronoiCalculator {
                                    chunkBucket.group));
 
             // Add all segments from chunk bucket to global bucket
-            // Note: EdgeBucket.segments is a List, and we're adding all segments
-            // Duplicate detection happens at the edge hashing level during calculation
-            for (EdgeSegment segment : chunkBucket.segments) {
-                globalBucket.segments.add(segment);
-            }
+            // HashSet automatically deduplicates based on hash
+            globalBucket.segments.addAll(chunkBucket.segments);
         }
     }
 
@@ -849,6 +847,19 @@ public class VoronoiCalculator {
             this.lodLevel = lodLevel;
             this.hash = hashEdge(start, end, spacing);
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof EdgeSegment)) return false;
+            EdgeSegment that = (EdgeSegment) o;
+            return hash == that.hash;
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
     }
 
     /**
@@ -856,7 +867,7 @@ public class VoronoiCalculator {
      * This allows us to batch render and calculate color once per bucket
      */
     static class EdgeBucket {
-        final List<EdgeSegment> segments;
+        final java.util.Set<EdgeSegment> segments;
         final Vector3f primaryColor;
         final Vector3f secondaryColor;
         final int portal1Index;
@@ -864,7 +875,7 @@ public class VoronoiCalculator {
         final int group;
 
         EdgeBucket(Vector3f primaryColor, Vector3f secondaryColor, int portal1Index, int portal2Index, int group) {
-            this.segments = new ArrayList<>();
+            this.segments = new java.util.HashSet<>();
             this.primaryColor = new Vector3f(primaryColor);
             this.secondaryColor = new Vector3f(secondaryColor);
             this.portal1Index = portal1Index;
