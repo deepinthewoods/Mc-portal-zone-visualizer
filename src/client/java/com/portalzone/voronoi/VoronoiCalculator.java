@@ -25,25 +25,53 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Calculates and renders 3D Voronoi cell borders for portal zones
  */
-public class VoronoiCalculator {
+public class VoronoiCalculator { 
     private static final VoronoiCalculator INSTANCE = new VoronoiCalculator();
+
+    /**
+     * LOD preset configurations
+     * NONE = No LOD reduction, full mesh detail (spacing 1 everywhere)
+     * LIGHT = Light LOD reduction, balanced quality/performance
+     * HEAVY = Heavy LOD reduction, most aggressive detail reduction
+     */
+    public enum LodPreset {
+        NONE("Full Detail", new int[] {}, new int[] {1}),
+        LIGHT("Light", new int[] {100, 200, 400, 800, 1200}, new int[] {1, 2, 4, 8, 16, 32}),
+        HEAVY("Heavy", new int[] {100, 300, 500, 700}, new int[] {1, 3, 9, 27, 91});
+
+        private final String displayName;
+        private final int[] baseLodRadii;
+        private final int[] lodSpacing;
+
+        LodPreset(String displayName, int[] baseLodRadii, int[] lodSpacing) {
+            this.displayName = displayName;
+            this.baseLodRadii = baseLodRadii;
+            this.lodSpacing = lodSpacing;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
+
+        public int[] getBaseLodRadii() {
+            return baseLodRadii;
+        }
+
+        public int[] getLodSpacing() {
+            return lodSpacing;
+        }
+
+        public LodPreset next() {
+            return values()[(ordinal() + 1) % values().length];
+        }
+    }
 
     // LOD (Level of Detail) constants
     private static final int MAX_BORDER_DISTANCE = 2048; // Increase to render farther borders.
-    private static final int[] BASE_LOD_RADII = new int[] {100, 300, 500, 700};
-    private static final int[] LOD_SPACING = new int[] {1, 3, 9, 27, 91};
-    //TODO make lod presets, above is "heavy":
-    //NONE:
-//    private static final int[] BASE_LOD_RADII = new int[] {};
-//    privae static final int[] LOD_SPACING = new int[] {1};
-    //LIGHT
-//    private static final int[] BASE_LOD_RADII = new int[] {100, 200, 400, 800, 1200};
-//    private static final int[] LOD_SPACING = new int[] {1, 2, 4, 8, 16, 32};
 
     private static final int TILE_SIZE = 128;
     private static final int WORLD_MIN_Y = -64;
     private static final int WORLD_MAX_Y = 320;
-    private static final int FINAL_LOD_LEVEL = LOD_SPACING.length;
 
     // Neutral zone color (for areas with no portal in range)
     private static final Vector3f NEUTRAL_ZONE_COLOR = new Vector3f(0.8f, 0.8f, 0.8f);
@@ -242,6 +270,7 @@ public class VoronoiCalculator {
 
         // Determine which color to show based on group and phase
         boolean showPrimary;
+        int colorGroup = getColorGroup(bucket);
 
         if (isInsideBorder) {
             // Inside border: show current zone 75% of time, other zone 25% of time
@@ -249,7 +278,7 @@ public class VoronoiCalculator {
             // 6/8 groups show current, 2/8 show other
             int minorityGroup1 = (int)phase;
             int minorityGroup2 = ((int)phase + 4) % 8;
-            boolean showCurrent = (bucket.group != minorityGroup1 && bucket.group != minorityGroup2);
+            boolean showCurrent = (colorGroup != minorityGroup1 && colorGroup != minorityGroup2);
 
             if (currentZoneIsPrimary) {
                 showPrimary = showCurrent;
@@ -259,11 +288,18 @@ public class VoronoiCalculator {
         } else {
             // Outside border: show 50/50, rotating which groups show which color
             // 4/8 groups show primary, 4/8 show secondary
-            int relativeGroup = (bucket.group - (int)phase + 8) % 8;
+            int relativeGroup = (colorGroup - (int)phase + 8) % 8;
             showPrimary = (relativeGroup < 4);
         }
 
         return showPrimary ? bucket.primaryColor : bucket.secondaryColor;
+    }
+
+    private static int getColorGroup(EdgeBucket bucket) {
+        int mix = bucket.group;
+        mix = mix * 31 + bucket.portal1Index;
+        mix = mix * 31 + bucket.portal2Index;
+        return Math.floorMod(mix, 8);
     }
 
     /**
@@ -316,13 +352,14 @@ public class VoronoiCalculator {
         }
 
         int minRadius = 0;
+        int[] lodSpacing = getLodSpacing();
         for (int i = 0; i < lodRadii.length; i++) {
             int maxRadius = Math.min(lodRadii[i], maxDistance);
             if (maxRadius <= minRadius) {
                 continue;
             }
 
-            int spacing = LOD_SPACING[i];
+            int spacing = lodSpacing[i];
 
             // Create overlap: each LOD (except first) extends inward by one spacing unit
             int effectiveMinRadius = minRadius;
@@ -344,12 +381,12 @@ public class VoronoiCalculator {
         }
 
         if (minRadius < maxDistance) {
-            int spacing = LOD_SPACING[LOD_SPACING.length - 1];
+            int spacing = lodSpacing[lodSpacing.length - 1];
             // Create overlap with previous LOD
             int effectiveMinRadius = Math.max(0, minRadius - spacing);
             if (!calculateVoronoiZonesRectangular(
                 request, portalX, portalY, portalZ,
-                effectiveMinRadius, maxDistance, spacing, LOD_SPACING.length - 1, true, bucketMap,
+                effectiveMinRadius, maxDistance, spacing, lodSpacing.length - 1, true, bucketMap,
                 null, null, null, null, null, null)) {
                 return false;
             }
@@ -460,7 +497,7 @@ public class VoronoiCalculator {
 
         // Handle final LOD level beyond configured radii
         if (minRadius < maxDistance) {
-            int lodLevel = FINAL_LOD_LEVEL;
+            int lodLevel = getFinalLodLevel();
             Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
                 request.playerPos, maxDistance, chunkSize, WORLD_MIN_Y, WORLD_MAX_Y);
 
@@ -547,26 +584,58 @@ public class VoronoiCalculator {
         }
     }
 
+    /**
+     * Get the current LOD preset configuration
+     */
+    private static LodPreset getCurrentLodPreset() {
+        return PortalManager.getInstance().getLodPreset();
+    }
+
+    /**
+     * Get the LOD spacing array for the current preset
+     */
+    private static int[] getLodSpacing() {
+        return getCurrentLodPreset().getLodSpacing();
+    }
+
+    /**
+     * Get the base LOD radii array for the current preset
+     */
+    private static int[] getBaseLodRadii() {
+        return getCurrentLodPreset().getBaseLodRadii();
+    }
+
+    /**
+     * Get the final LOD level for the current preset
+     */
+    private static int getFinalLodLevel() {
+        return getLodSpacing().length;
+    }
+
     private static int[] buildLodRadii(int lod0Max) {
+        int[] lodSpacing = getLodSpacing();
+        int[] baseLodRadii = getBaseLodRadii();
+
         int clamped = Math.max(4, Math.min(MAX_BORDER_DISTANCE, lod0Max));
-        int[] radii = new int[LOD_SPACING.length];
+        int[] radii = new int[lodSpacing.length];
         radii[0] = clamped;
         for (int i = 1; i < radii.length; i++) {
-            int baseIndex = Math.min(i - 1, BASE_LOD_RADII.length - 1);
-            int candidate = BASE_LOD_RADII[baseIndex];
+            int baseIndex = Math.min(i - 1, baseLodRadii.length - 1);
+            int candidate = baseLodRadii.length > 0 ? baseLodRadii[baseIndex] : 0;
             radii[i] = Math.max(candidate, radii[i - 1]);
         }
         return radii;
     }
 
     private static int getSpacingForLod(int lodLevel) {
+        int[] lodSpacing = getLodSpacing();
         if (lodLevel < 0) {
-            return LOD_SPACING[0];
+            return lodSpacing[0];
         }
-        if (lodLevel >= LOD_SPACING.length) {
-            return LOD_SPACING[LOD_SPACING.length - 1];
+        if (lodLevel >= lodSpacing.length) {
+            return lodSpacing[lodSpacing.length - 1];
         }
-        return LOD_SPACING[lodLevel];
+        return lodSpacing[lodLevel];
     }
 
 
@@ -1173,7 +1242,7 @@ public class VoronoiCalculator {
 
         // Use hash-based pseudo-random group assignment for more organic-looking patterns
         // This prevents visible grid patterns when render skipping occurs
-        int assignedGroup = computePseudoRandomGroup(start, end, portal1Index, portal2Index, geometricGroup);
+        int assignedGroup = computePseudoRandomGroup(start, end, portal1Index, portal2Index, geometricGroup, spacing);
 
         // Get or create bucket for this (group, portal_pair)
         BucketKey key = new BucketKey(assignedGroup, portal1Index, portal2Index);
@@ -1188,15 +1257,18 @@ public class VoronoiCalculator {
      * Compute a pseudo-random group (0-7) based on line segment coordinates and portal indices.
      * This creates a more organic distribution of groups rather than geometric patterns.
      * Uses a deterministic hash so each line always gets the same group (no flickering).
+     *
+     * Normalizes coordinates by spacing to ensure consistent group distribution across all LOD levels.
      */
-    private static int computePseudoRandomGroup(Vec3 start, Vec3 end, int portal1, int portal2, int geometricGroup) {
-        // Hash both endpoints for better distribution
-        int x1 = (int) Math.floor(start.x);
-        int y1 = (int) Math.floor(start.y);
-        int z1 = (int) Math.floor(start.z);
-        int x2 = (int) Math.floor(end.x);
-        int y2 = (int) Math.floor(end.y);
-        int z2 = (int) Math.floor(end.z);
+    private static int computePseudoRandomGroup(Vec3 start, Vec3 end, int portal1, int portal2, int geometricGroup, int spacing) {
+        // Normalize coordinates by spacing to ensure consistent distribution across LOD levels
+        // This prevents clustering of higher LOD segments into the same groups
+        int x1 = (int) Math.floor(start.x / spacing);
+        int y1 = (int) Math.floor(start.y / spacing);
+        int z1 = (int) Math.floor(start.z / spacing);
+        int x2 = (int) Math.floor(end.x / spacing);
+        int y2 = (int) Math.floor(end.y / spacing);
+        int z2 = (int) Math.floor(end.z / spacing);
 
         // Use a strong mixing function (based on MurmurHash3's finalizer)
         // This creates more random-looking patterns than FNV-1a
@@ -1399,8 +1471,10 @@ public class VoronoiCalculator {
             return distance <= lodRadii[0];
         }
         if (segment.lodLevel < lodRadii.length) {
-            return distance > lodRadii[segment.lodLevel - 1]
-                && distance <= lodRadii[segment.lodLevel];
+            // Account for overlap: segments extend inward by one spacing unit
+            // This matches the overlap created during generation (effectiveMinRadius = minRadius - spacing)
+            double minDist = Math.max(0, lodRadii[segment.lodLevel - 1] - segment.spacing);
+            return distance > minDist && distance <= lodRadii[segment.lodLevel];
         }
         return distance > lodRadii[lodRadii.length - 1];
     }

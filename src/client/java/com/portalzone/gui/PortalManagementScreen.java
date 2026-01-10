@@ -158,6 +158,19 @@ public class PortalManagementScreen extends BaseScreen {
             presetButton.setDisplayString("Detail: " + newPreset.getDisplayName());
         });
 
+        // LOD preset cycle button
+        y += 25;
+        WidgetLabel lodPresetLabel = new WidgetLabel(x + 12, y, 200, 10, 0xFFFFFFFF, "LOD Preset");
+        this.addWidget(lodPresetLabel);
+        y += 10;
+        ButtonGeneric lodPresetButton = new ButtonGeneric(x + 12, y, 100, 20,
+            "LOD: " + manager.getLodPreset().getDisplayName());
+        this.addButton(lodPresetButton, (button, mouseButton) -> {
+            com.portalzone.voronoi.VoronoiCalculator.LodPreset newLodPreset = manager.getLodPreset().next();
+            manager.setLodPreset(newLodPreset);
+            lodPresetButton.setDisplayString("LOD: " + newLodPreset.getDisplayName());
+        });
+
         // LOD 0 distance
         y += 25;
         this.createIntField(x, y,

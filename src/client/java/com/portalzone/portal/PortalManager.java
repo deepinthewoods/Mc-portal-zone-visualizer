@@ -87,6 +87,7 @@ public class PortalManager {
     private float minimumMarkerScreenPercent = 2.0f; // Default: 2% of long screen side
     private LineRenderPreset lineRenderPreset = LineRenderPreset.FULL; // Default: render all lines
     private int lod0Distance = 64; // Default: LOD 0 radius in blocks
+    private com.portalzone.voronoi.VoronoiCalculator.LodPreset lodPreset = com.portalzone.voronoi.VoronoiCalculator.LodPreset.HEAVY; // Default: HEAVY
 
     /**
      * Line rendering presets
@@ -934,6 +935,26 @@ public class PortalManager {
     }
 
     /**
+     * Set the LOD preset.
+     */
+    public void setLodPreset(com.portalzone.voronoi.VoronoiCalculator.LodPreset preset) {
+        if (this.lodPreset == preset) {
+            return;
+        }
+        this.lodPreset = preset;
+        // Invalidate chunk cache since LOD preset affects which chunks are calculated
+        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForLod0DistanceChange();
+        saveSettingsNow();
+    }
+
+    /**
+     * Get the LOD preset.
+     */
+    public com.portalzone.voronoi.VoronoiCalculator.LodPreset getLodPreset() {
+        return lodPreset;
+    }
+
+    /**
      * Set the portal marker draw distance (in blocks).
      * Use -1 for infinite distance.
      */
@@ -1098,6 +1119,14 @@ public class PortalManager {
             } else if (root.has("borderFuzzStartDistance")) {
                 setLod0Distance(root.get("borderFuzzStartDistance").getAsInt());
             }
+            if (root.has("lodPreset")) {
+                try {
+                    String presetName = root.get("lodPreset").getAsString();
+                    lodPreset = com.portalzone.voronoi.VoronoiCalculator.LodPreset.valueOf(presetName);
+                } catch (Exception e) {
+                    lodPreset = com.portalzone.voronoi.VoronoiCalculator.LodPreset.HEAVY;
+                }
+            }
             if (root.has("portalMarkerDrawDistance")) {
                 setPortalMarkerDrawDistance(root.get("portalMarkerDrawDistance").getAsDouble());
             }
@@ -1200,6 +1229,7 @@ public class PortalManager {
         root.addProperty("minimumMarkerScreenPercent", minimumMarkerScreenPercent);
         root.addProperty("lineRenderPreset", lineRenderPreset.name());
         root.addProperty("lod0Distance", lod0Distance);
+        root.addProperty("lodPreset", lodPreset.name());
 
         // Save draw distance settings
         root.addProperty("portalMarkerDrawDistance", portalMarkerDrawDistance);
