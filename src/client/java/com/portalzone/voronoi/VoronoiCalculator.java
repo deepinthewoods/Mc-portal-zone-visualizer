@@ -196,15 +196,25 @@ public class VoronoiCalculator {
         List<EdgeBucket>[] buckets = cachedBuckets.get();
         for (int group = 0; group < 8; group++) {
             for (EdgeBucket bucket : buckets[group]) {
-                // Calculate color once for this entire bucket
-                Vector3f color = selectBucketColor(bucket, nearestPortalIndex, gameTime);
-
-                // Render all segments in this bucket with the calculated color
+                // Render all segments in this bucket
                 for (EdgeSegment segment : bucket.segments) {
                     // Use bucket.group to ensure we're checking the bucket's actual assigned group
                     if (!shouldRenderSegment(segment, camPos, bucket.group, preset, phase, lod0Distance, lodRadii)) {
                         continue;
                     }
+
+                    // Calculate segment midpoint to determine LOD range
+                    double midX = (segment.start.x + segment.end.x) * 0.5;
+                    double midY = (segment.start.y + segment.end.y) * 0.5;
+                    double midZ = (segment.start.z + segment.end.z) * 0.5;
+                    double dx = midX - camPos.x;
+                    double dy = midY - camPos.y;
+                    double dz = midZ - camPos.z;
+                    double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    boolean isLod0 = distance <= lod0Distance;
+
+                    // Calculate color for this segment (use spatial pattern in LOD 0, temporal in higher LODs)
+                    Vector3f color = selectBucketColor(bucket, nearestPortalIndex, gameTime, isLod0);
 
                     PortalRenderer.submitLine(matrices, bufferSource,
                         color.x, color.y, color.z, 0.6f,
@@ -258,7 +268,7 @@ public class VoronoiCalculator {
      * - Borders where camera is inside show current zone color 75% of the time
      * - Other borders show 50/50
      */
-    private Vector3f selectBucketColor(EdgeBucket bucket, int nearestPortalIndex, long gameTime) {
+    private Vector3f selectBucketColor(EdgeBucket bucket, int nearestPortalIndex, long gameTime, boolean isLod0) {
         // Check if camera is inside this border (one of the two portals is the current zone)
         boolean isInsideBorder = (nearestPortalIndex == bucket.portal1Index || nearestPortalIndex == bucket.portal2Index);
 
@@ -271,25 +281,47 @@ public class VoronoiCalculator {
         // Determine which color to show based on group and phase
         boolean showPrimary;
 
-        if (isInsideBorder) {
-            // Inside border: show current zone 75% of time, other zone 25% of time
-            // Rotate which groups (2 out of 8) show the minority color
-            // 6/8 groups show current, 2/8 show other
-            int minorityGroup1 = (int)phase;
-            int minorityGroup2 = ((int)phase + 4) % 8;
-            boolean showCurrent = (bucket.group != minorityGroup1 && bucket.group != minorityGroup2);
+        // At LOD 0 distance, use group-based spatial pattern since all lines render
+        // At higher LOD distances, use time-based alternation since only some groups render
+        boolean useSpatialPattern = isLod0;
 
-            if (currentZoneIsPrimary) {
-                showPrimary = showCurrent;
+        if (isInsideBorder) {
+            if (useSpatialPattern) {
+                // Group-based: rotate which groups (2 out of 8) show the minority color
+                // Creates spatial pattern where different groups show different colors
+                int minorityGroup1 = (int)phase;
+                int minorityGroup2 = ((int)phase + 4) % 8;
+                boolean showCurrent = (bucket.group != minorityGroup1 && bucket.group != minorityGroup2);
+
+                if (currentZoneIsPrimary) {
+                    showPrimary = showCurrent;
+                } else {
+                    showPrimary = !showCurrent;
+                }
             } else {
-                showPrimary = !showCurrent;
+                // Time-based: show current zone 75% of time, other zone 25% of time
+                // Phases 0-5 show current, phases 6-7 show other
+                int offset = (bucket.portal1Index + bucket.portal2Index) % 8;
+                int adjustedPhase = ((int)phase + offset) % 8;
+                boolean showCurrent = adjustedPhase < 6; // 6/8 = 75% current, 2/8 = 25% other
+
+                if (currentZoneIsPrimary) {
+                    showPrimary = showCurrent;
+                } else {
+                    showPrimary = !showCurrent;
+                }
             }
         } else {
-            // Outside border: alternate colors every 4 phases (50/50 split)
-            // Add portal indices as offset so different borders alternate at different times
-            int offset = (bucket.portal1Index + bucket.portal2Index) % 8;
-            int adjustedPhase = ((int)phase + offset) % 8;
-            showPrimary = adjustedPhase < 4;
+            if (useSpatialPattern) {
+                // Group-based: 4/8 groups show primary, 4/8 show secondary, rotating
+                int relativeGroup = (bucket.group - (int)phase + 8) % 8;
+                showPrimary = (relativeGroup < 4);
+            } else {
+                // Time-based: alternate colors every 4 phases (50/50 split)
+                int offset = (bucket.portal1Index + bucket.portal2Index) % 8;
+                int adjustedPhase = ((int)phase + offset) % 8;
+                showPrimary = adjustedPhase < 4;
+            }
         }
 
         return showPrimary ? bucket.primaryColor : bucket.secondaryColor;
