@@ -270,7 +270,6 @@ public class VoronoiCalculator {
 
         // Determine which color to show based on group and phase
         boolean showPrimary;
-        int colorGroup = getColorGroup(bucket);
 
         if (isInsideBorder) {
             // Inside border: show current zone 75% of time, other zone 25% of time
@@ -278,7 +277,7 @@ public class VoronoiCalculator {
             // 6/8 groups show current, 2/8 show other
             int minorityGroup1 = (int)phase;
             int minorityGroup2 = ((int)phase + 4) % 8;
-            boolean showCurrent = (colorGroup != minorityGroup1 && colorGroup != minorityGroup2);
+            boolean showCurrent = (bucket.group != minorityGroup1 && bucket.group != minorityGroup2);
 
             if (currentZoneIsPrimary) {
                 showPrimary = showCurrent;
@@ -286,21 +285,16 @@ public class VoronoiCalculator {
                 showPrimary = !showCurrent;
             }
         } else {
-            // Outside border: show 50/50, rotating which groups show which color
-            // 4/8 groups show primary, 4/8 show secondary
-            int relativeGroup = (colorGroup - (int)phase + 8) % 8;
-            showPrimary = (relativeGroup < 4);
+            // Outside border: alternate colors every 4 phases (50/50 split)
+            // Add portal indices as offset so different borders alternate at different times
+            int offset = (bucket.portal1Index + bucket.portal2Index) % 8;
+            int adjustedPhase = ((int)phase + offset) % 8;
+            showPrimary = adjustedPhase < 4;
         }
 
         return showPrimary ? bucket.primaryColor : bucket.secondaryColor;
     }
 
-    private static int getColorGroup(EdgeBucket bucket) {
-        int mix = bucket.group;
-        mix = mix * 31 + bucket.portal1Index;
-        mix = mix * 31 + bucket.portal2Index;
-        return Math.floorMod(mix, 8);
-    }
 
     /**
      * Calculate dynamic max distance based on portal locations
