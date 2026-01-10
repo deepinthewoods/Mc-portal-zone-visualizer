@@ -32,6 +32,14 @@ public class VoronoiCalculator {
     private static final int MAX_BORDER_DISTANCE = 2048; // Increase to render farther borders.
     private static final int[] BASE_LOD_RADII = new int[] {100, 300, 500, 700};
     private static final int[] LOD_SPACING = new int[] {1, 3, 9, 27, 91};
+    //TODO make lod presets, above is "heavy":
+    //NONE:
+//    private static final int[] BASE_LOD_RADII = new int[] {};
+//    privae static final int[] LOD_SPACING = new int[] {1};
+    //LIGHT
+//    private static final int[] BASE_LOD_RADII = new int[] {100, 200, 400, 800, 1200};
+//    private static final int[] LOD_SPACING = new int[] {1, 2, 4, 8, 16, 32};
+
     private static final int TILE_SIZE = 128;
     private static final int WORLD_MIN_Y = -64;
     private static final int WORLD_MAX_Y = 320;
@@ -80,8 +88,8 @@ public class VoronoiCalculator {
 
     @SuppressWarnings("unchecked")
     private static List<EdgeBucket>[] createEmptyBuckets() {
-        List<EdgeBucket>[] buckets = new List[4];
-        for (int i = 0; i < 4; i++) {
+        List<EdgeBucket>[] buckets = new List[8];
+        for (int i = 0; i < 8; i++) {
             buckets[i] = new ArrayList<>();
         }
         return buckets;
@@ -151,14 +159,14 @@ public class VoronoiCalculator {
         int[] lodRadii = buildLodRadii(lod0Distance);
 
         long gameTime = mc.level != null ? mc.level.getGameTime() : 0L;
-        long phase = (gameTime / 8L) % 4; // 4-phase rotation for line skipping (8 ticks per phase)
+        long phase = (gameTime / 8L) % 8; // 8-phase rotation for line skipping (8 ticks per phase)
 
         // Find nearest portal to camera for zone detection
         int nearestPortalIndex = findNearestPortalToCamera(camPos, currentDim, sourceDim);
 
         // Render cached buckets - organized by group for efficient batch rendering
         List<EdgeBucket>[] buckets = cachedBuckets.get();
-        for (int group = 0; group < 4; group++) {
+        for (int group = 0; group < 8; group++) {
             for (EdgeBucket bucket : buckets[group]) {
                 // Calculate color once for this entire bucket
                 Vector3f color = selectBucketColor(bucket, nearestPortalIndex, gameTime);
@@ -217,7 +225,7 @@ public class VoronoiCalculator {
 
     /**
      * Select color for an entire bucket based on group and zone detection
-     * - Each bucket contains edges from one of 4 groups with the same portal pair
+     * - Each bucket contains edges from one of 8 groups with the same portal pair
      * - Both colors are visible each frame, but which groups show which color rotates
      * - Borders where camera is inside show current zone color 75% of the time
      * - Other borders show 50/50
@@ -230,19 +238,18 @@ public class VoronoiCalculator {
         boolean currentZoneIsPrimary = (nearestPortalIndex == bucket.portal1Index);
 
         // Calculate phase from game time
-        long phase = (gameTime / 8L) % 4;
+        long phase = (gameTime / 8L) % 8;
 
         // Determine which color to show based on group and phase
         boolean showPrimary;
 
         if (isInsideBorder) {
             // Inside border: show current zone 75% of time, other zone 25% of time
-            // Rotate which group shows the minority color
-            // Phase 0: Group 0 shows other, Groups 1,2,3 show current (75% current)
-            // Phase 1: Group 1 shows other, Groups 0,2,3 show current (75% current)
-            // Phase 2: Group 2 shows other, Groups 0,1,3 show current (75% current)
-            // Phase 3: Group 3 shows other, Groups 0,1,2 show current (75% current)
-            boolean showCurrent = (bucket.group != phase);
+            // Rotate which groups (2 out of 8) show the minority color
+            // 6/8 groups show current, 2/8 show other
+            int minorityGroup1 = (int)phase;
+            int minorityGroup2 = ((int)phase + 4) % 8;
+            boolean showCurrent = (bucket.group != minorityGroup1 && bucket.group != minorityGroup2);
 
             if (currentZoneIsPrimary) {
                 showPrimary = showCurrent;
@@ -251,12 +258,9 @@ public class VoronoiCalculator {
             }
         } else {
             // Outside border: show 50/50, rotating which groups show which color
-            // Phase 0: Groups 0,1 show primary, Groups 2,3 show secondary
-            // Phase 1: Groups 1,2 show primary, Groups 0,3 show secondary
-            // Phase 2: Groups 2,3 show primary, Groups 0,1 show secondary
-            // Phase 3: Groups 3,0 show primary, Groups 1,2 show secondary
-            int relativeGroup = (bucket.group - (int)phase + 4) % 4;
-            showPrimary = (relativeGroup < 2);
+            // 4/8 groups show primary, 4/8 show secondary
+            int relativeGroup = (bucket.group - (int)phase + 8) % 8;
+            showPrimary = (relativeGroup < 4);
         }
 
         return showPrimary ? bucket.primaryColor : bucket.secondaryColor;
@@ -1181,7 +1185,7 @@ public class VoronoiCalculator {
     }
 
     /**
-     * Compute a pseudo-random group (0-3) based on line segment coordinates and portal indices.
+     * Compute a pseudo-random group (0-7) based on line segment coordinates and portal indices.
      * This creates a more organic distribution of groups rather than geometric patterns.
      * Uses a deterministic hash so each line always gets the same group (no flickering).
      */
@@ -1214,8 +1218,8 @@ public class VoronoiCalculator {
         hash *= 0xc4ceb9fe1a85ec53L;
         hash ^= hash >>> 33;
 
-        // Map to group 0-3
-        return (int) (Math.abs(hash) % 4);
+        // Map to group 0-7
+        return (int) (Math.abs(hash) % 8);
     }
 
 
@@ -1257,23 +1261,15 @@ public class VoronoiCalculator {
                 return true;
 
             case MEDIUM:
-                // Render 50% of lines using 3-phase rotation
-                // Phase 0: groups 0,1
-                // Phase 1: groups 2,3
-                // Phase 2: groups 1,2
-                if (phase == 0) {
-                    return group == 0 || group == 1;
-                } else if (phase == 1) {
-                    return group == 2 || group == 3;
-                } else { // phase == 2
-                    return group == 1 || group == 2;
-                }
+                // Render 50% of lines using 8-phase rotation (4 out of 8 groups)
+                // Each phase renders 4 consecutive groups, rotating which ones
+                int mediumOffset = (int)phase % 8;
+                int mediumRelativeGroup = (group - mediumOffset + 8) % 8;
+                return mediumRelativeGroup < 4;
 
             case LOW:
-                // Render 25% of lines (1 out of 4 groups) using 3-phase rotation
-                // Phase 0: group 0
-                // Phase 1: group 1
-                // Phase 2: group 2
+                // Render 12.5% of lines (1 out of 8 groups) using 8-phase rotation
+                // Each phase renders a different group
                 return group == (int)phase;
 
             case PHASED:
@@ -1319,33 +1315,30 @@ public class VoronoiCalculator {
      */
     private static boolean shouldRenderGroupForDensity(int group, int phase, int numGroups) {
         switch (numGroups) {
-            case 4: // 100% - all groups
+            case 8: // 100% - all groups
                 return true;
 
-            case 3: // 75% - 3 out of 4 groups, rotating which one is excluded
-                // Phase 0: exclude group 3 (render 0,1,2)
-                // Phase 1: exclude group 0 (render 1,2,3)
-                // Phase 2: exclude group 1 (render 2,3,0)
-                int excludedGroup = (3 - phase + 3) % 4;
-                return group != excludedGroup;
+            case 6: // 75% - 6 out of 8 groups, rotating which two are excluded
+                // Each phase excludes a different pair of groups
+                int excludedPair = phase % 4;
+                int excluded1 = excludedPair * 2;
+                int excluded2 = excludedPair * 2 + 1;
+                return group != excluded1 && group != excluded2;
 
-            case 2: // 50% - 2 out of 4 groups
-                // Phase 0: groups 0,1
-                // Phase 1: groups 2,3
-                // Phase 2: groups 1,2
-                if (phase == 0) {
-                    return group == 0 || group == 1;
-                } else if (phase == 1) {
-                    return group == 2 || group == 3;
-                } else { // phase == 2
-                    return group == 1 || group == 2;
-                }
+            case 4: // 50% - 4 out of 8 groups
+                // Each phase renders 4 consecutive groups, rotating
+                int offset4 = phase % 8;
+                int relativeGroup4 = (group - offset4 + 8) % 8;
+                return relativeGroup4 < 4;
 
-            case 1: // 25% - 1 out of 4 groups, rotating which one
-                // Phase 0: group 0
-                // Phase 1: group 1
-                // Phase 2: group 2
-                return group == phase;
+            case 2: // 25% - 2 out of 8 groups
+                // Each phase renders 2 consecutive groups, rotating
+                int offset2 = (phase % 4) * 2;
+                int relativeGroup2 = (group - offset2 + 8) % 8;
+                return relativeGroup2 < 2;
+
+            case 1: // 12.5% - 1 out of 8 groups, rotating which one
+                return group == (phase % 8);
 
             default:
                 return false;
