@@ -300,10 +300,12 @@ public class VoronoiCalculator {
                 }
             } else {
                 // Time-based: show current zone 75% of time, other zone 25% of time
-                // Phases 0-5 show current, phases 6-7 show other
+                // Alternate every phase: 6 phases current, 2 phases other
+                // Pattern: current, current, current, other, current, current, current, other
                 int offset = (bucket.portal1Index + bucket.portal2Index) % 8;
                 int adjustedPhase = ((int)phase + offset) % 8;
-                boolean showCurrent = adjustedPhase < 6; // 6/8 = 75% current, 2/8 = 25% other
+                // Show other color at phases 3 and 7 (2/8 = 25%), current for rest (6/8 = 75%)
+                boolean showCurrent = (adjustedPhase != 3 && adjustedPhase != 7);
 
                 if (currentZoneIsPrimary) {
                     showPrimary = showCurrent;
@@ -317,10 +319,10 @@ public class VoronoiCalculator {
                 int relativeGroup = (bucket.group - (int)phase + 8) % 8;
                 showPrimary = (relativeGroup < 4);
             } else {
-                // Time-based: alternate colors every 4 phases (50/50 split)
+                // Time-based: alternate colors every phase (50/50 split)
                 int offset = (bucket.portal1Index + bucket.portal2Index) % 8;
                 int adjustedPhase = ((int)phase + offset) % 8;
-                showPrimary = adjustedPhase < 4;
+                showPrimary = (adjustedPhase % 2) == 0;
             }
         }
 
