@@ -708,7 +708,7 @@ public class PortalManager {
 
     /**
      * Get the portal that the given portal connects to in the other dimension
-     * Minecraft portal linking is based on distance - each portal links to the closest portal in the other dimension
+     * Uses Minecraft's portal linking algorithm with proper search radius checking
      *
      * @param sourcePortal The portal to find the link for
      * @param currentDimension The current dimension we're rendering in
@@ -717,24 +717,16 @@ public class PortalManager {
     public Optional<PortalInfo> getLinkedPortal(PortalInfo sourcePortal, ResourceKey<Level> currentDimension) {
         ResourceKey<Level> targetDimension = sourcePortal.getLinkedDimension();
 
-        // Get all portals in the target dimension
+        // Get all portals in the target dimension (excluding simulated)
         Set<PortalInfo> targetPortals = getPortalsInDimension(targetDimension);
+        targetPortals.removeIf(PortalInfo::isSimulated);
 
-        // Translate source portal position to target dimension's coordinate space
-        Vec3 sourcePosInTargetDim = translateBetweenDimensions(
+        // Use the proper portal linking algorithm that checks search radius
+        return Optional.ofNullable(PortalLinkingAlgorithm.findLinkedPortal(
             sourcePortal.getCenterPos(),
             sourcePortal.dimension,
-            targetDimension
-        );
-
-        // Find the closest portal in the target dimension (comparing in target dimension coords)
-        final Vec3 finalSourcePos = sourcePosInTargetDim;
-        return targetPortals.stream()
-            .filter(p -> !p.isSimulated())
-            .min(Comparator.comparingDouble(p -> {
-                Vec3 targetPos = p.getCenterPos();
-                return finalSourcePos.distanceTo(targetPos);
-            }));
+            targetPortals
+        ));
     }
 
     /**
@@ -743,7 +735,7 @@ public class PortalManager {
      *
      * Minecraft portal linking is calculated per-block, not per-portal. Different
      * portal blocks within the same portal structure can link to different destination
-     * portals based on their exact coordinates.
+     * portals based on their exact coordinates and the search radius.
      *
      * @param sourcePortal The portal to find links for
      * @param currentDimension The current dimension we're rendering in
@@ -771,19 +763,18 @@ public class PortalManager {
         Map<PortalInfo, List<Vec3>> blocksByDestination = new HashMap<>();
 
         for (Vec3 blockPos : portalBlockPositions) {
-            // Translate this block's position to target dimension
-            Vec3 translatedBlockPos = translateBetweenDimensions(
+            // Use the proper portal linking algorithm that checks search radius
+            PortalInfo linkedPortal = PortalLinkingAlgorithm.findLinkedPortal(
                 blockPos,
                 sourcePortal.dimension,
-                targetDimension
+                targetPortals
             );
 
-            // Find the nearest portal in target dimension
-            PortalInfo nearestPortal = findNearestPortal(translatedBlockPos, targetPortals);
-
-            if (nearestPortal != null) {
+            // Only add if a portal was found within search radius
+            // If null, this block would create a new portal (no connection line)
+            if (linkedPortal != null) {
                 blocksByDestination
-                    .computeIfAbsent(nearestPortal, k -> new ArrayList<>())
+                    .computeIfAbsent(linkedPortal, k -> new ArrayList<>())
                     .add(blockPos);
             }
         }
@@ -819,9 +810,9 @@ public class PortalManager {
         double offsetX, offsetZ;
         if (portal.orientation == PortalInfo.Axis.X) {
             offsetX = portal.width % 2 == 0 ? -halfWidth + 0.5 : -halfWidth;
-            offsetZ = portal.width % 2 == 0 ? -0.5 : 0;
+            offsetZ = 0; // Portal is always 1 block thick (odd) in perpendicular axis
         } else { // Axis.Z
-            offsetX = portal.width % 2 == 0 ? -0.5 : 0;
+            offsetX = 0; // Portal is always 1 block thick (odd) in perpendicular axis
             offsetZ = portal.width % 2 == 0 ? -halfWidth + 0.5 : -halfWidth;
         }
 
@@ -855,15 +846,6 @@ public class PortalManager {
         }
 
         return positions;
-    }
-
-    /**
-     * Find the nearest portal to a given position (in target dimension coordinates)
-     */
-    private PortalInfo findNearestPortal(Vec3 pos, Set<PortalInfo> portals) {
-        return portals.stream()
-            .min(Comparator.comparingDouble(p -> p.getCenterPos().distanceTo(pos)))
-            .orElse(null);
     }
 
     /**
@@ -1570,7 +1552,12 @@ public class PortalManager {
             pending.remove(chunkPos);
         }
 
-        // Remove portals in this chunk
+        int minX = chunkPos.getMinBlockX();
+        int minZ = chunkPos.getMinBlockZ();
+        int maxX = chunkPos.getMaxBlockX();
+        int maxZ = chunkPos.getMaxBlockZ();
+
+        // Remove portals in this chunk from live tracking
         Set<PortalInfo> portals = portalsByDimension.get(dimension);
         if (portals != null) {
             portals.removeIf(portal -> {
@@ -1578,6 +1565,37 @@ public class PortalManager {
                 return portalChunk.equals(chunkPos);
             });
             portalsChanged = true;
+        }
+
+        // Also mark persisted portals in this chunk as invalid immediately
+        // They will be re-validated or removed during the rescan
+        Map<UUID, PortalInfo> dimensionPersistedPortals = persistedPortals.get(dimension);
+        if (dimensionPersistedPortals != null) {
+            List<UUID> toRemove = new ArrayList<>();
+            for (Map.Entry<UUID, PortalInfo> entry : dimensionPersistedPortals.entrySet()) {
+                PortalInfo portal = entry.getValue();
+                BlockPos portalPos = portal.position;
+
+                // Check if portal is in this chunk
+                if (portalPos.getX() >= minX && portalPos.getX() <= maxX &&
+                    portalPos.getZ() >= minZ && portalPos.getZ() <= maxZ) {
+                    // Mark as invalid and remove from persisted portals
+                    portal.setValid(false);
+                    toRemove.add(entry.getKey());
+                    portalsChanged = true;
+                }
+            }
+
+            // Remove invalid portals and clean up metadata
+            for (UUID uuid : toRemove) {
+                dimensionPersistedPortals.remove(uuid);
+                cleanupPortalMetadata(uuid);
+            }
+
+            // Save changes if any portals were removed
+            if (!toRemove.isEmpty()) {
+                saveSettingsNow();
+            }
         }
 
         if (portalDiscoveryEnabled) {

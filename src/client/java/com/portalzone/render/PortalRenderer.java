@@ -49,7 +49,6 @@ public class PortalRenderer {
     // Connection line animation state
     private static double connectionLineAnimOffset = 0;
     private static final int CONNECTION_SEGMENT_LENGTH = 3; // World units per segment
-    private static final double CONNECTION_LINE_OFFSET = 0.5; // Offset for bidirectional lines
 
     // Line counting for performance monitoring
     private static int lineCountThisFrame = 0;
@@ -506,8 +505,8 @@ public class PortalRenderer {
                     ? HIDDEN_PORTAL_COLOR
                     : manager.getPortalColor(portal);
 
-                // No offset for lines originating from current dimension
-                drawDashedLine(matrices, bufferSource, startPos, endPos, color, false);
+                // Offset direction 1: currentDim → otherDim
+                drawDashedLine(matrices, bufferSource, startPos, endPos, color, 1);
             }
         }
 
@@ -537,8 +536,8 @@ public class PortalRenderer {
                     ? HIDDEN_PORTAL_COLOR
                     : manager.getPortalColor(portal);
 
-                // Apply offset for lines originating from other dimension (so bidirectional pairs don't overlap)
-                drawDashedLine(matrices, bufferSource, startPos, endPos, color, true);
+                // Offset direction -1: otherDim → currentDim (opposite offset)
+                drawDashedLine(matrices, bufferSource, startPos, endPos, color, -1);
             }
         }
     }
@@ -547,21 +546,30 @@ public class PortalRenderer {
      * Draw a dashed line from startPos to endPos with 3-phase pattern
      * Pattern: draw-don't draw-don't draw (each phase is 3 units)
      * Always uses NO_DEPTH testing for visibility through walls
+     * @param offsetDirection 1 or -1 to offset the line perpendicular to its direction (for bidirectional lines)
      */
     private static void drawDashedLine(PoseStack matrices, MultiBufferSource bufferSource,
-                                       Vec3 startPos, Vec3 endPos, Vector3f color,
-                                       boolean applyOffset) {
+                                       Vec3 startPos, Vec3 endPos, Vector3f color, int offsetDirection) {
         Vec3 lineDir = endPos.subtract(startPos);
         double lineLength = lineDir.length();
         Vec3 normalizedDir = lineDir.normalize();
 
-        // Apply perpendicular offset for bidirectional lines
-        if (applyOffset) {
-            // Calculate perpendicular direction (in XZ plane for horizontal offset)
-            Vec3 perpDir = new Vec3(-normalizedDir.z, 0, normalizedDir.x).normalize().scale(CONNECTION_LINE_OFFSET);
-            startPos = startPos.add(perpDir);
-            endPos = endPos.add(perpDir);
+        // Calculate perpendicular offset to separate bidirectional lines
+        // Use a small offset of 0.1 blocks
+        Vec3 offset = Vec3.ZERO;
+        if (offsetDirection != 0) {
+            // Get a perpendicular vector using cross product with an arbitrary up vector
+            // Use Y-axis unless the line is vertical, then use X-axis
+            Vec3 referenceVec = Math.abs(normalizedDir.y) < 0.9
+                ? new Vec3(0, 1, 0)
+                : new Vec3(1, 0, 0);
+            Vec3 perpendicular = normalizedDir.cross(referenceVec).normalize();
+            offset = perpendicular.scale(0.1 * offsetDirection);
         }
+
+        // Apply offset to both start and end positions
+        Vec3 offsetStartPos = startPos.add(offset);
+        Vec3 offsetEndPos = endPos.add(offset);
 
         // Pattern: draw (3 units), gap (3 units), gap (3 units) = 9 units total
         int patternLength = CONNECTION_SEGMENT_LENGTH * 3;
@@ -582,8 +590,8 @@ public class PortalRenderer {
                 double segEnd = Math.min(lineLength, distance + CONNECTION_SEGMENT_LENGTH);
 
                 if (segEnd > segStart) {
-                    Vec3 p1 = startPos.add(normalizedDir.scale(segStart));
-                    Vec3 p2 = startPos.add(normalizedDir.scale(segEnd));
+                    Vec3 p1 = offsetStartPos.add(normalizedDir.scale(segStart));
+                    Vec3 p2 = offsetStartPos.add(normalizedDir.scale(segEnd));
 
                     // Always use false for depth testing (visible through walls)
                     submitLine(matrices, bufferSource, color.x, color.y, color.z, 0.6f, FULLBRIGHT,

@@ -29,7 +29,7 @@ public class PortalLinkingAlgorithm {
      * Find which portal a position would link to in the destination dimension.
      * This simulates Minecraft's portal linking behavior:
      * 1. Translates coordinates based on dimension scaling (8:1 Nether:Overworld)
-     * 2. Searches for portals within a radius (128 in Nether, 16 in Overworld)
+     * 2. Searches for portals within a radius (128 in Nether, 1024 in Overworld)
      * 3. Returns the nearest portal within the search radius
      * 4. Returns null if no portal exists in range (would create new portal)
      *
@@ -77,7 +77,7 @@ public class PortalLinkingAlgorithm {
      * Minecraft uses different search radii based on the dimension's coordinate scaling.
      *
      * @param dimension The dimension to get the search radius for
-     * @return 128 for Nether, 16 for Overworld
+     * @return 128 for Nether, 1024 for Overworld
      */
     public static int getSearchRadius(ResourceKey<Level> dimension) {
         return Level.NETHER.equals(dimension) ? SEARCH_RADIUS_NETHER : SEARCH_RADIUS_OVERWORLD;
