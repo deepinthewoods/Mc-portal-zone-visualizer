@@ -119,9 +119,6 @@ public class PortalRenderer {
         // Render portals in current dimension
         Set<PortalInfo> currentDimPortals = PortalManager.getInstance().getPortalsInDimension(currentDim);
         for (PortalInfo portal : currentDimPortals) {
-            if (portal.isSimulated()) {
-                continue;
-            }
             renderPortalMarker(matrices, bufferSource, camPos, portal, portal.getCenterPos(), currentDim,
                 camera, portalMarkersUseDepth);
         }
@@ -131,9 +128,6 @@ public class PortalRenderer {
         Set<PortalInfo> otherDimPortals = PortalManager.getInstance().getPortalsInDimension(otherDim);
 
         for (PortalInfo portal : otherDimPortals) {
-            if (portal.isSimulated()) {
-                continue;
-            }
             Vec3 translatedPos = portal.getTranslatedPos();
             renderPortalMarker(matrices, bufferSource, camPos, portal, translatedPos, currentDim,
                 camera, portalMarkersUseDepth);
@@ -194,8 +188,12 @@ public class PortalRenderer {
         // Use world position directly (PoseStack is already camera-relative)
         Vec3 pos = worldPos;
 
-        // Draw marker shape based on portal dimension
-        if (Level.OVERWORLD.equals(portal.dimension)) {
+        // Draw marker shape based on portal type and dimension
+        if (portal.isSimulated()) {
+            // Simulated portals use a portal frame icon (square/rectangle outline)
+            drawBillboardPortalFrame(matrices, bufferSource, pos, markerHalfSize.x, markerHalfSize.y,
+                color.x, color.y, color.z, 0.8f, camera, useDepthTest);
+        } else if (Level.OVERWORLD.equals(portal.dimension)) {
             drawBillboardEllipse(matrices, bufferSource, pos, markerHalfSize.x, markerHalfSize.y,
                 color.x, color.y, color.z, 0.8f, camera, useDepthTest);
         } else {
@@ -364,6 +362,52 @@ public class PortalRenderer {
     }
 
     /**
+     * Draw a billboard portal frame (square/rectangle outline) facing the camera
+     * Used for simulated portals
+     */
+    private static void drawBillboardPortalFrame(PoseStack matrices, MultiBufferSource bufferSource,
+                                                  Vec3 center, float halfWidth, float halfHeight,
+                                                  float r, float g, float b, float a, Camera camera,
+                                                  boolean useDepthTest) {
+        var rot = camera.rotation();
+
+        // Camera rotation already faces the camera; use it directly for billboard axes
+        Quaternionf cameraRot = new Quaternionf(rot);
+
+        // Calculate camera-facing right and up vectors
+        Vector3f rv = new Vector3f(1, 0, 0).rotate(cameraRot);
+        Vector3f uv = new Vector3f(0, 1, 0).rotate(cameraRot);
+        Vec3 right = new Vec3(rv.x, rv.y, rv.z).scale(halfWidth);
+        Vec3 up = new Vec3(uv.x, uv.y, uv.z).scale(halfHeight);
+
+        // Calculate normal from camera forward vector (pointing toward camera)
+        Vector3f forward = new Vector3f(0f, 0f, 1f).rotate(cameraRot);
+
+        // Calculate 4 corners of the rectangle
+        Vec3 topRight = center.add(right.x + up.x, right.y + up.y, right.z + up.z);
+        Vec3 topLeft = center.add(-right.x + up.x, -right.y + up.y, -right.z + up.z);
+        Vec3 bottomRight = center.add(right.x - up.x, right.y - up.y, right.z - up.z);
+        Vec3 bottomLeft = center.add(-right.x - up.x, -right.y - up.y, -right.z - up.z);
+
+        // Draw the rectangle outline (4 sides)
+        submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+            topLeft.x, topLeft.y, topLeft.z,
+            topRight.x, topRight.y, topRight.z, forward, useDepthTest);
+
+        submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+            topRight.x, topRight.y, topRight.z,
+            bottomRight.x, bottomRight.y, bottomRight.z, forward, useDepthTest);
+
+        submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+            bottomRight.x, bottomRight.y, bottomRight.z,
+            bottomLeft.x, bottomLeft.y, bottomLeft.z, forward, useDepthTest);
+
+        submitMarkerLine(matrices, bufferSource, r, g, b, a, FULLBRIGHT,
+            bottomLeft.x, bottomLeft.y, bottomLeft.z,
+            topLeft.x, topLeft.y, topLeft.z, forward, useDepthTest);
+    }
+
+    /**
      * Submit a line to the render queue
      */
     public static void submitLine(PoseStack matrices, MultiBufferSource bufferSource,
@@ -482,7 +526,24 @@ public class PortalRenderer {
         // Render connection lines from current dimension portals to other dimension
         Set<PortalInfo> currentDimPortals = manager.getPortalsInDimension(currentDim);
         for (PortalInfo portal : currentDimPortals) {
+            // For simulated portals, draw a simple line to their linked portal
             if (portal.isSimulated()) {
+                Vec3 startPos = portal.getCenterPos();
+                Vec3 endPos = portal.getTranslatedPos();
+
+                // Check draw distances
+                if (!isWithinDrawDistance(startPos, camPos, manager) ||
+                    !isWithinDrawDistance(endPos, camPos, manager)) {
+                    continue;
+                }
+
+                // Get color for this portal
+                Vector3f color = manager.isPortalHidden(portal)
+                    ? HIDDEN_PORTAL_COLOR
+                    : manager.getPortalColor(portal);
+
+                // Draw connection line for simulated portal
+                drawDashedLine(matrices, bufferSource, startPos, endPos, color, 1);
                 continue;
             }
 
@@ -513,7 +574,24 @@ public class PortalRenderer {
         // Render connection lines from other dimension portals back to current dimension
         Set<PortalInfo> otherDimPortals = manager.getPortalsInDimension(otherDim);
         for (PortalInfo portal : otherDimPortals) {
+            // For simulated portals, draw a simple line to their linked portal
             if (portal.isSimulated()) {
+                Vec3 startPos = portal.getTranslatedPos();
+                Vec3 endPos = portal.getCenterPos();
+
+                // Check draw distances
+                if (!isWithinDrawDistance(startPos, camPos, manager) ||
+                    !isWithinDrawDistance(endPos, camPos, manager)) {
+                    continue;
+                }
+
+                // Get color for this portal
+                Vector3f color = manager.isPortalHidden(portal)
+                    ? HIDDEN_PORTAL_COLOR
+                    : manager.getPortalColor(portal);
+
+                // Draw connection line for simulated portal
+                drawDashedLine(matrices, bufferSource, startPos, endPos, color, -1);
                 continue;
             }
 

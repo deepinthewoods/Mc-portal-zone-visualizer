@@ -615,65 +615,64 @@ public class PortalManagementScreen extends BaseScreen {
             (newZ) -> updatePortalPosition(entry, entry.portal.position.getX(), entry.portal.position.getY(), newZ),
             "Z:", entry, isEditable);
 
-        // Hue slider for color (if not simulated)
-        if (!entry.portal.isSimulated()) {
-            y += 20;
-            WidgetLabel hueLabel = new WidgetLabel(nameX, y + 2, 40, 10, 0xFFFFFFFF, "Hue:");
-            this.addWidget(hueLabel);
-            entry.hueLabel = hueLabel;
+        // Hue slider for color (all portals, including simulated with 25% saturation)
+        y += 20;
+        String hueLabel = entry.portal.isSimulated() ? "Hue (25% sat):" : "Hue:";
+        WidgetLabel hueLabelWidget = new WidgetLabel(nameX, y + 2, 100, 10, 0xFFFFFFFF, hueLabel);
+        this.addWidget(hueLabelWidget);
+        entry.hueLabel = hueLabelWidget;
 
-            double currentHue = manager.getPortalHue(entry.portal);
-            GuiTextFieldDouble hueField = new GuiTextFieldDouble(nameX + 35, y, 50, 16, this.textRenderer);
-            hueField.setTextWrapper(String.valueOf(currentHue));
-            this.addTextField(hueField, new ITextFieldListener<GuiTextFieldDouble>() {
+        double currentHue = manager.getPortalHue(entry.portal);
+        GuiTextFieldDouble hueField = new GuiTextFieldDouble(nameX + 90, y, 50, 16, this.textRenderer);
+        hueField.setTextWrapper(String.valueOf(currentHue));
+        this.addTextField(hueField, new ITextFieldListener<GuiTextFieldDouble>() {
+            @Override
+            public boolean onTextChange(GuiTextFieldDouble field) {
+                try {
+                    double hue = Double.parseDouble(field.getTextWrapper());
+                    float wrappedHue = (float) ((hue % 360.0 + 360.0) % 360.0);
+                    manager.setPortalHue(entry.portal.uuid, wrappedHue);
+                } catch (NumberFormatException ignored) {
+                    return false;
+                }
+                return true;
+            }
+        });
+        entry.hueField = hueField;
+
+        // Hue slider
+        WidgetSlider hueSlider = new WidgetSlider(
+            nameX + 145,
+            y + 1,
+            120,
+            12,
+            new ISliderCallback() {
                 @Override
-                public boolean onTextChange(GuiTextFieldDouble field) {
-                    try {
-                        double hue = Double.parseDouble(field.getTextWrapper());
-                        float wrappedHue = (float) ((hue % 360.0 + 360.0) % 360.0);
-                        manager.setPortalHue(entry.portal.uuid, wrappedHue);
-                    } catch (NumberFormatException ignored) {
-                        return false;
-                    }
-                    return true;
+                public int getMaxSteps() {
+                    return 360;
                 }
-            });
-            entry.hueField = hueField;
 
-            // Hue slider
-            WidgetSlider hueSlider = new WidgetSlider(
-                nameX + 90,
-                y + 1,
-                120,
-                12,
-                new ISliderCallback() {
-                    @Override
-                    public int getMaxSteps() {
-                        return 360;
-                    }
-
-                    @Override
-                    public double getValueRelative() {
-                        return manager.getPortalHue(entry.portal) / 360.0;
-                    }
-
-                    @Override
-                    public void setValueRelative(double value) {
-                        double hue = value * 360.0;
-                        float wrappedHue = (float) ((hue % 360.0 + 360.0) % 360.0);
-                        manager.setPortalHue(entry.portal.uuid, wrappedHue);
-                        hueField.setTextWrapper(String.valueOf(manager.getPortalHue(entry.portal)));
-                    }
-
-                    @Override
-                    public String getFormattedDisplayValue() {
-                        return String.format("%.1f", manager.getPortalHue(entry.portal));
-                    }
+                @Override
+                public double getValueRelative() {
+                    return manager.getPortalHue(entry.portal) / 360.0;
                 }
-            );
-            this.addWidget(hueSlider);
-            entry.hueSlider = hueSlider;
-        }
+
+                @Override
+                public void setValueRelative(double value) {
+                    double hue = value * 360.0;
+                    float wrappedHue = (float) ((hue % 360.0 + 360.0) % 360.0);
+                    manager.setPortalHue(entry.portal.uuid, wrappedHue);
+                    hueField.setTextWrapper(String.valueOf(manager.getPortalHue(entry.portal)));
+                }
+
+                @Override
+                public String getFormattedDisplayValue() {
+                    return String.format("%.1f", manager.getPortalHue(entry.portal));
+                }
+            }
+        );
+        this.addWidget(hueSlider);
+        entry.hueSlider = hueSlider;
 
         // Hide/Show button
         y += 25;
@@ -843,13 +842,13 @@ public class PortalManagementScreen extends BaseScreen {
 
         // Update hide button position
         if (entry.hideButton != null) {
-            int buttonY = entry.portal.isSimulated() ? (coordY + 20) : (coordY + 45);
+            int buttonY = coordY + 45;
             entry.hideButton.setY(buttonY);
         }
 
         // Update remove button position (for simulated portals)
         if (entry.removeButton != null) {
-            int buttonY = entry.portal.isSimulated() ? (coordY + 20) : (coordY + 45);
+            int buttonY = coordY + 45;
             entry.removeButton.setY(buttonY);
         }
     }

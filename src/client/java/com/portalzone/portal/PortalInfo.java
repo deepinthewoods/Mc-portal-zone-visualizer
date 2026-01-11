@@ -192,13 +192,18 @@ public class PortalInfo {
 
     /**
      * Generate a consistent hue based on UUID
+     * Uses both most and least significant bits for better randomization
      */
     private static float generateHue(UUID uuid) {
-        // Use UUID bytes to generate a vibrant hue
-        long bits = uuid.getMostSignificantBits();
+        // Use both MSB and LSB for better distribution
+        long msb = uuid.getMostSignificantBits();
+        long lsb = uuid.getLeastSignificantBits();
 
-        // Extract hue from UUID
-        return ((bits & 0xFFFF) / 65535.0f) * 360.0f;
+        // XOR the two parts and use more bits for better randomization
+        long combined = msb ^ lsb;
+
+        // Use a larger portion of the combined bits for better distribution
+        return ((combined & 0xFFFFFFFFL) / (float) 0xFFFFFFFFL) * 360.0f;
     }
 
     /**
@@ -208,6 +213,36 @@ public class PortalInfo {
         // Use HSV to RGB conversion for vibrant colors
         // Saturation = 0.8, Value = 1.0 for bright colors
         float saturation = 0.8f;
+        float value = 1.0f;
+
+        float c = value * saturation;
+        float x = c * (1 - Math.abs(((hue / 60.0f) % 2) - 1));
+        float m = value - c;
+
+        float r, g, b;
+        if (hue < 60) {
+            r = c; g = x; b = 0;
+        } else if (hue < 120) {
+            r = x; g = c; b = 0;
+        } else if (hue < 180) {
+            r = 0; g = c; b = x;
+        } else if (hue < 240) {
+            r = 0; g = x; b = c;
+        } else if (hue < 300) {
+            r = x; g = 0; b = c;
+        } else {
+            r = c; g = 0; b = x;
+        }
+
+        return new Vector3f(r + m, g + m, b + m);
+    }
+
+    /**
+     * Convert a hue to an RGB color with custom saturation
+     * Used for simulated portals with 25% saturation
+     */
+    public static Vector3f colorFromHueWithSaturation(float hue, float saturation) {
+        // Use HSV to RGB conversion
         float value = 1.0f;
 
         float c = value * saturation;

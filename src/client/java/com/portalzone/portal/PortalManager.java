@@ -946,9 +946,6 @@ public class PortalManager {
      * Set a custom hue for a portal
      */
     public void setPortalHue(UUID portalUuid, float hue) {
-        if (isSimulatedPortal(portalUuid)) {
-            return;
-        }
         float clamped = Math.max(0.0f, Math.min(360.0f, hue));
         portalHues.put(portalUuid, clamped);
         portalsChanged = true;
@@ -958,19 +955,18 @@ public class PortalManager {
      * Get the hue for a portal (custom hue if set, otherwise default)
      */
     public float getPortalHue(PortalInfo portal) {
-        if (portal.isSimulated()) {
-            return 0.0f;
-        }
         Float custom = portalHues.get(portal.uuid);
         return custom != null ? custom : portal.getBaseHue();
     }
 
     /**
      * Get the color for a portal (custom hue if set, otherwise default)
+     * Simulated portals use 25% saturation
      */
     public Vector3f getPortalColor(PortalInfo portal) {
         if (portal.isSimulated()) {
-            return SIMULATED_PORTAL_COLOR;
+            // Simulated portals use 25% saturation
+            return PortalInfo.colorFromHueWithSaturation(getPortalHue(portal), 0.25f);
         }
         return PortalInfo.colorFromHue(getPortalHue(portal));
     }
