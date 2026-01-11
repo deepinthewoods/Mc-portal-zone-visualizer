@@ -138,8 +138,6 @@ public class VoronoiCalculator {
 
         // Check for dimension change and invalidate cache
         if (cachedDimension != null && !currentDim.equals(cachedDimension)) {
-            System.out.println("[VoronoiChunk] Dimension changed from " +
-                cachedDimension.location() + " to " + currentDim.location() + ", invalidating cache");
             chunkCache.invalidateAll();
             cachedPortalConfigHash = 0L;
         }
@@ -421,10 +419,6 @@ public class VoronoiCalculator {
         }
 
         int totalSegments = bucketMap.values().stream().mapToInt(b -> b.segments.size()).sum();
-        System.out.println("[Voronoi] portals=" + portalCount
-            + " segments=" + totalSegments
-            + " buckets=" + bucketMap.size()
-            + " maxDist=" + maxDistance);
         return true;
     }
 
@@ -476,9 +470,6 @@ public class VoronoiCalculator {
             Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
                 request.playerPos, maxRadius, chunkSize, WORLD_MIN_Y, WORLD_MAX_Y);
 
-            System.out.println("[VoronoiChunk] LOD " + lodLevel + ": " + requiredChunks.size() +
-                " chunks in range (radius " + minRadius + "-" + maxRadius + ")");
-
             // For each required chunk, check cache or calculate
             for (ChunkCoord chunkCoord : requiredChunks) {
                 // Check for cancellation
@@ -529,9 +520,6 @@ public class VoronoiCalculator {
             Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
                 request.playerPos, maxDistance, chunkSize, WORLD_MIN_Y, WORLD_MAX_Y);
 
-            System.out.println("[VoronoiChunk] Final LOD: " + requiredChunks.size() +
-                " chunks in range (radius " + minRadius + "-" + maxDistance + ")");
-
             for (ChunkCoord chunkCoord : requiredChunks) {
                 if (shouldCancelRequest(request)) {
                     return false;
@@ -567,17 +555,6 @@ public class VoronoiCalculator {
         long endTime = System.currentTimeMillis();
         int totalSegments = bucketMap.values().stream().mapToInt(b -> b.segments.size()).sum();
         double hitRate = totalChunks > 0 ? (cacheHits * 100.0 / totalChunks) : 0.0;
-
-        System.out.println("[VoronoiChunk] Calculation complete: " +
-            "portals=" + portalCount +
-            ", chunks=" + totalChunks +
-            ", hits=" + cacheHits +
-            ", misses=" + cacheMisses +
-            ", hitRate=" + String.format("%.1f%%", hitRate) +
-            ", segments=" + totalSegments +
-            ", buckets=" + bucketMap.size() +
-            ", time=" + (endTime - startTime) + "ms" +
-            ", " + chunkCache.getStatistics());
 
         return true;
     }
@@ -762,7 +739,6 @@ public class VoronoiCalculator {
         if (count == 0) {
             // No portals, hash is 0
             if (cachedPortalConfigHash != 0L) {
-                System.out.println("[VoronoiChunk] No portals detected, invalidating cache");
                 chunkCache.invalidateAll();
                 cachedPortalConfigHash = 0L;
             }
@@ -798,9 +774,6 @@ public class VoronoiCalculator {
 
         // Check if hash changed
         if (cachedPortalConfigHash != newHash) {
-            System.out.println("[VoronoiChunk] Portal configuration changed (hash: " +
-                Long.toHexString(cachedPortalConfigHash) + " -> " + Long.toHexString(newHash) +
-                "), invalidating cache");
             chunkCache.invalidateAll();
             cachedPortalConfigHash = newHash;
         }
@@ -811,7 +784,6 @@ public class VoronoiCalculator {
      * Invalidates all cached chunks since border visibility changes.
      */
     public void invalidateCacheForNeutralBordersChange() {
-        System.out.println("[VoronoiChunk] Neutral borders setting changed, invalidating cache");
         chunkCache.invalidateAll();
         cachedPortalConfigHash = 0L; // Force recalculation of hash
     }
@@ -823,7 +795,6 @@ public class VoronoiCalculator {
      * affected LOD levels in the future.
      */
     public void invalidateCacheForLod0DistanceChange() {
-        System.out.println("[VoronoiChunk] LOD0 distance changed, invalidating cache");
         chunkCache.invalidateAll();
         cachedPortalConfigHash = 0L; // Force recalculation of hash
     }
@@ -840,12 +811,26 @@ public class VoronoiCalculator {
         final int hash;
 
         EdgeSegment(Vec3 start, Vec3 end, int spacing, int lodLevel) {
-            this.start = start;
-            this.end = end;
+            // Normalize direction to ensure same line always has same hash
+            // Use lexicographic ordering: compare x, then y, then z
+            if (shouldSwap(start, end)) {
+                this.start = end;
+                this.end = start;
+            } else {
+                this.start = start;
+                this.end = end;
+            }
             this.spacing = spacing;
             this.alwaysRender = spacing == 1;
             this.lodLevel = lodLevel;
-            this.hash = hashEdge(start, end, spacing);
+            this.hash = hashEdge(this.start, this.end, spacing);
+        }
+
+        private static boolean shouldSwap(Vec3 a, Vec3 b) {
+            // Lexicographic comparison
+            if (a.x != b.x) return a.x > b.x;
+            if (a.y != b.y) return a.y > b.y;
+            return a.z > b.z;
         }
 
         @Override
@@ -1285,16 +1270,30 @@ public class VoronoiCalculator {
      * Uses a deterministic hash so each line always gets the same group (no flickering).
      *
      * Normalizes coordinates by spacing to ensure consistent group distribution across all LOD levels.
+     * Normalizes line direction to ensure the same physical line always gets the same group,
+     * regardless of which direction it was generated.
+     * NOTE: geometricGroup is NOT included in the hash to ensure the same physical line segment
+     * always gets the same group assignment, regardless of which border generated it.
+     * This allows HashSet deduplication to work properly across buckets.
      */
     private static int computePseudoRandomGroup(Vec3 start, Vec3 end, int portal1, int portal2, int geometricGroup, int spacing) {
+        // Normalize direction to ensure same line always gets same group
+        Vec3 p1 = start;
+        Vec3 p2 = end;
+        if (shouldSwapPoints(p1, p2)) {
+            Vec3 temp = p1;
+            p1 = p2;
+            p2 = temp;
+        }
+
         // Normalize coordinates by spacing to ensure consistent distribution across LOD levels
         // This prevents clustering of higher LOD segments into the same groups
-        int x1 = (int) Math.floor(start.x / spacing);
-        int y1 = (int) Math.floor(start.y / spacing);
-        int z1 = (int) Math.floor(start.z / spacing);
-        int x2 = (int) Math.floor(end.x / spacing);
-        int y2 = (int) Math.floor(end.y / spacing);
-        int z2 = (int) Math.floor(end.z / spacing);
+        int x1 = (int) Math.floor(p1.x / spacing);
+        int y1 = (int) Math.floor(p1.y / spacing);
+        int z1 = (int) Math.floor(p1.z / spacing);
+        int x2 = (int) Math.floor(p2.x / spacing);
+        int y2 = (int) Math.floor(p2.y / spacing);
+        int z2 = (int) Math.floor(p2.z / spacing);
 
         // Use a strong mixing function (based on MurmurHash3's finalizer)
         // This creates more random-looking patterns than FNV-1a
@@ -1307,7 +1306,7 @@ public class VoronoiCalculator {
         hash = hash * 31 + z2;
         hash = hash * 31 + portal1;
         hash = hash * 31 + portal2;
-        hash = hash * 31 + geometricGroup;
+        // geometricGroup is NOT included - same physical line should always get same group
 
         // MurmurHash3 finalizer - provides excellent bit mixing
         hash ^= hash >>> 33;
@@ -1318,6 +1317,16 @@ public class VoronoiCalculator {
 
         // Map to group 0-7
         return (int) (Math.abs(hash) % 8);
+    }
+
+    /**
+     * Helper method to determine if two points should be swapped for normalization
+     */
+    private static boolean shouldSwapPoints(Vec3 a, Vec3 b) {
+        // Lexicographic comparison
+        if (a.x != b.x) return a.x > b.x;
+        if (a.y != b.y) return a.y > b.y;
+        return a.z > b.z;
     }
 
 
@@ -1601,7 +1610,6 @@ public class VoronoiCalculator {
 
             if (!success) {
                 // Calculation was cancelled - don't update cache
-                System.out.println("[VoronoiChunk] Recalculation cancelled, keeping old data visible");
                 continue;
             }
 
@@ -1618,8 +1626,6 @@ public class VoronoiCalculator {
             cachedSourceDimension = request.sourceDim;
             cachedPlayerPos = request.playerPos;
             cachedSimulateHeld = request.simulateHeld;
-
-            System.out.println("[VoronoiChunk] Recalculation complete, new data now visible");
         }
     }
 

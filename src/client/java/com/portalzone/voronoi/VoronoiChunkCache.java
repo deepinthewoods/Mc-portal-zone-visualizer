@@ -169,12 +169,6 @@ public class VoronoiChunkCache {
             }
         }
 
-        if (removed > 0) {
-            System.out.println("[VoronoiChunkCache] Invalidated " + removed +
-                             " chunks due to portal config change (new hash: " +
-                             Long.toHexString(newPortalHash) + ")");
-        }
-
         return removed;
     }
 
@@ -194,9 +188,6 @@ public class VoronoiChunkCache {
         int previousSize = cache.size();
         cache.clear();
 
-        if (previousSize > 0) {
-            System.out.println("[VoronoiChunkCache] Invalidated all " + previousSize + " chunks");
-        }
     }
 
     /**
@@ -312,13 +303,6 @@ public class VoronoiChunkCache {
             return;
         }
 
-        boolean logEviction = shouldLogEviction();
-        if (logEviction) {
-            System.out.println("[VoronoiChunkCache] Cache size (" + currentSize +
-                ") exceeds max (" + maxCacheSize + "), evicting " +
-                toRemove + " oldest chunks");
-        }
-
         // Find the N oldest entries by timestamp
         cache.entrySet().stream()
             .sorted(Comparator.comparingLong(e -> e.getValue().getTimestamp()))
@@ -329,9 +313,6 @@ public class VoronoiChunkCache {
                 }
             });
 
-        if (logEviction) {
-            System.out.println("[VoronoiChunkCache] Eviction complete, new size: " + cache.size());
-        }
     }
 
     private boolean shouldLogEviction() {

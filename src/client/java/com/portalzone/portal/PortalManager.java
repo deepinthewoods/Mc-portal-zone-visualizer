@@ -1133,13 +1133,13 @@ public class PortalManager {
                                 PortalInfo portal = PortalInfo.fromJson(portalJson);
                                 portalMap.put(portalUuid, portal);
                             } catch (Exception e) {
-                                System.err.println("[PortalZoneVisualizer] Failed to load portal " + portalEntry.getKey() + ": " + e.getMessage());
+                                // Silently skip failed portal loads
                             }
                         }
 
                         persistedPortals.put(dimension, portalMap);
                     } catch (Exception e) {
-                        System.err.println("[PortalZoneVisualizer] Failed to load portals for dimension " + dimensionEntry.getKey() + ": " + e.getMessage());
+                        // Silently skip failed dimension loads
                     }
                 }
             }
@@ -1162,18 +1162,18 @@ public class PortalManager {
                                 PortalInfo portal = PortalInfo.fromJson(portalJson);
                                 portalMap.put(portalUuid, portal);
                             } catch (Exception e) {
-                                System.err.println("[PortalZoneVisualizer] Failed to load simulated portal " + portalEntry.getKey() + ": " + e.getMessage());
+                                // Silently skip failed simulated portal loads
                             }
                         }
 
                         simulatedPortals.put(dimension, portalMap);
                     } catch (Exception e) {
-                        System.err.println("[PortalZoneVisualizer] Failed to load simulated portals for dimension " + dimensionEntry.getKey() + ": " + e.getMessage());
+                        // Silently skip failed simulated dimension loads
                     }
                 }
             }
         } catch (Exception e) {
-            System.err.println("[PortalZoneVisualizer] Failed to load settings: " + e.getMessage());
+            // Silently skip failed settings loads
         }
     }
 
@@ -1251,7 +1251,7 @@ public class PortalManager {
                 GSON.toJson(root, writer);
             }
         } catch (Exception e) {
-            System.err.println("[PortalZoneVisualizer] Failed to save settings: " + e.getMessage());
+            // Silently skip failed settings saves
         }
     }
 

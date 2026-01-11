@@ -1,5 +1,6 @@
 package com.portalzone.gui;
 
+import com.portalzone.PortalZoneVisualizerClient;
 import com.portalzone.portal.PortalInfo;
 import com.portalzone.portal.PortalManager;
 import fi.dy.masa.malilib.gui.BaseScreen;
@@ -44,6 +45,7 @@ public class PortalManagementScreen extends BaseScreen {
     private int scrollOffset = 0;
     private int maxScroll = 0;
     private double lastFinitePortalMarkerDrawDistance = 2048.0;
+    private boolean wasKeyDown = false;
 
     public PortalManagementScreen(Screen parent) {
         super();
@@ -545,24 +547,25 @@ public class PortalManagementScreen extends BaseScreen {
 
         // X coordinate
         int coordX = nameX + 50;
+        boolean isEditable = entry.portal.isSimulated();
         this.createCoordinateField(coordX, y,
             () -> entry.portal.position.getX(),
             (newX) -> updatePortalPosition(entry, newX, entry.portal.position.getY(), entry.portal.position.getZ()),
-            "X:", entry);
+            "X:", entry, isEditable);
 
         // Y coordinate
         coordX += 80;
         this.createCoordinateField(coordX, y,
             () -> entry.portal.position.getY(),
             (newY) -> updatePortalPosition(entry, entry.portal.position.getX(), newY, entry.portal.position.getZ()),
-            "Y:", entry);
+            "Y:", entry, isEditable);
 
         // Z coordinate
         coordX += 80;
         this.createCoordinateField(coordX, y,
             () -> entry.portal.position.getZ(),
             (newZ) -> updatePortalPosition(entry, entry.portal.position.getX(), entry.portal.position.getY(), newZ),
-            "Z:", entry);
+            "Z:", entry, isEditable);
 
         // Hue slider for color (if not simulated)
         if (!entry.portal.isSimulated()) {
@@ -650,44 +653,53 @@ public class PortalManagementScreen extends BaseScreen {
                                        java.util.function.IntSupplier supplier,
                                        java.util.function.IntConsumer consumer,
                                        String label,
-                                       PortalEntry entry) {
+                                       PortalEntry entry,
+                                       boolean isEditable) {
         WidgetLabel labelWidget = new WidgetLabel(x - 15, y + 2, 20, 10, 0xFFFFFFFF, label);
         this.addWidget(labelWidget);
         entry.coordLabels.add(labelWidget);
 
-        GuiTextFieldInteger textField = new GuiTextFieldInteger(x, y, 40, 16, this.textRenderer);
-        textField.setTextWrapper(String.valueOf(supplier.getAsInt()));
-        this.addTextField(textField, new ITextFieldListener<GuiTextFieldInteger>() {
-            @Override
-            public boolean onTextChange(GuiTextFieldInteger field) {
-                String text = field.getTextWrapper();
-                try {
-                    int value = Integer.parseInt(text);
-                    consumer.accept(value);
-                } catch (NumberFormatException ignored) {
-                    return false;
+        if (isEditable) {
+            // Create editable text field and +- button for simulated portals
+            GuiTextFieldInteger textField = new GuiTextFieldInteger(x, y, 40, 16, this.textRenderer);
+            textField.setTextWrapper(String.valueOf(supplier.getAsInt()));
+            this.addTextField(textField, new ITextFieldListener<GuiTextFieldInteger>() {
+                @Override
+                public boolean onTextChange(GuiTextFieldInteger field) {
+                    String text = field.getTextWrapper();
+                    try {
+                        int value = Integer.parseInt(text);
+                        consumer.accept(value);
+                    } catch (NumberFormatException ignored) {
+                        return false;
+                    }
+                    return true;
                 }
-                return true;
-            }
-        });
-        entry.coordFields.add(textField);
+            });
+            entry.coordFields.add(textField);
 
-        ButtonGeneric button = new ButtonGeneric(x + 42, y, MaLiLibIcons.BTN_PLUSMINUS_16);
-        this.addButton(button, (btn, mouseButton) -> {
-            try {
-                int current = Integer.parseInt(textField.getTextWrapper());
-                int delta = getClickStepMultiplier();
-                delta = (mouseButton == 1) ? -delta : delta;
-                int next = current + delta;
-                consumer.accept(next);
-                textField.setTextWrapper(String.valueOf(next));
-            } catch (NumberFormatException e) {
-                // Fallback to supplier if text field has invalid value
-                int current = supplier.getAsInt();
-                textField.setTextWrapper(String.valueOf(current));
-            }
-        });
-        entry.coordButtons.add(button);
+            ButtonGeneric button = new ButtonGeneric(x + 42, y, MaLiLibIcons.BTN_PLUSMINUS_16);
+            this.addButton(button, (btn, mouseButton) -> {
+                try {
+                    int current = Integer.parseInt(textField.getTextWrapper());
+                    int delta = getClickStepMultiplier();
+                    delta = (mouseButton == 1) ? -delta : delta;
+                    int next = current + delta;
+                    consumer.accept(next);
+                    textField.setTextWrapper(String.valueOf(next));
+                } catch (NumberFormatException e) {
+                    // Fallback to supplier if text field has invalid value
+                    int current = supplier.getAsInt();
+                    textField.setTextWrapper(String.valueOf(current));
+                }
+            });
+            entry.coordButtons.add(button);
+        } else {
+            // Just show the value as a label for real portals
+            WidgetLabel valueLabel = new WidgetLabel(x, y + 2, 40, 10, 0xFFAAAAAA, String.valueOf(supplier.getAsInt()));
+            this.addWidget(valueLabel);
+            entry.coordLabels.add(valueLabel);
+        }
     }
 
     private int getClickStepMultiplier() {
@@ -714,41 +726,6 @@ public class PortalManagementScreen extends BaseScreen {
             manager.removeSimulatedPortal(entry.portal.uuid);
             manager.addSimulatedPortal(entry.dimension, newPos);
             this.loadPortals();
-        }
-    }
-
-    @Override
-    protected void drawScreenBackground(GuiGraphics graphics, int mouseX, int mouseY) {
-        super.drawScreenBackground(graphics, mouseX, mouseY);
-
-        // Draw title
-        graphics.drawCenteredString(this.textRenderer, this.title, this.width / 2, 10, 0xFFFFFFFF);
-
-        // Draw portal entries with scissor test for scrolling
-        int viewportTop = VIEWPORT_TOP;
-        int viewportBottom = this.height - VIEWPORT_BOTTOM_MARGIN;
-        int y = LIST_START_Y - scrollOffset;
-
-        // Update all widget positions first (even for off-screen entries)
-        int updateY = LIST_START_Y - scrollOffset;
-        for (ListEntry entry : listEntries) {
-            if (entry.type == EntryType.PORTAL) {
-                updatePortalWidgetPositions(entry.portalEntry, updateY);
-            }
-            updateY += entry.height;
-        }
-
-        // Then render only visible entries
-        y = LIST_START_Y - scrollOffset;
-        for (ListEntry entry : listEntries) {
-            if (y + entry.height > viewportTop && y < viewportBottom) {
-                if (entry.type == EntryType.HEADER) {
-                    renderHeader(graphics, entry.headerText, y);
-                } else {
-                    renderPortalEntry(graphics, entry.portalEntry, y);
-                }
-            }
-            y += entry.height;
         }
     }
 
@@ -882,6 +859,50 @@ public class PortalManagementScreen extends BaseScreen {
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
         scrollOffset = Math.max(0, Math.min(maxScroll, scrollOffset - (int)(scrollY * SCROLL_SPEED)));
         return true;
+    }
+
+    @Override
+    protected void drawScreenBackground(GuiGraphics graphics, int mouseX, int mouseY) {
+        super.drawScreenBackground(graphics, mouseX, mouseY);
+
+        // Check if the portal management key is pressed to close the GUI
+        // We track state to only trigger once per press (not every frame while held)
+        boolean isKeyDown = PortalZoneVisualizerClient.portalManagementKey.isDown();
+        if (isKeyDown && !wasKeyDown) {
+            this.closeGui(true);
+            return;
+        }
+        wasKeyDown = isKeyDown;
+
+        // Draw title
+        graphics.drawCenteredString(this.textRenderer, this.title, this.width / 2, 10, 0xFFFFFFFF);
+
+        // Draw portal entries with scissor test for scrolling
+        int viewportTop = VIEWPORT_TOP;
+        int viewportBottom = this.height - VIEWPORT_BOTTOM_MARGIN;
+        int y = LIST_START_Y - scrollOffset;
+
+        // Update all widget positions first (even for off-screen entries)
+        int updateY = LIST_START_Y - scrollOffset;
+        for (ListEntry entry : listEntries) {
+            if (entry.type == EntryType.PORTAL) {
+                updatePortalWidgetPositions(entry.portalEntry, updateY);
+            }
+            updateY += entry.height;
+        }
+
+        // Then render only visible entries
+        y = LIST_START_Y - scrollOffset;
+        for (ListEntry entry : listEntries) {
+            if (y + entry.height > viewportTop && y < viewportBottom) {
+                if (entry.type == EntryType.HEADER) {
+                    renderHeader(graphics, entry.headerText, y);
+                } else {
+                    renderPortalEntry(graphics, entry.portalEntry, y);
+                }
+            }
+            y += entry.height;
+        }
     }
 
     @Override

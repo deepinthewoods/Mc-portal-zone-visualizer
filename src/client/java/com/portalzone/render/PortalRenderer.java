@@ -127,10 +127,6 @@ public class PortalRenderer {
         long elapsedTime = currentTime - lastReportTime;
 
         if (elapsedTime >= 2000) { // 2 seconds = 2000 milliseconds
-            double averageLinesPerFrame = frameCount > 0 ? (double) totalLineCount / frameCount : 0.0;
-            System.out.println(String.format("[PortalRenderer] Lines per frame: %.2f (total: %d, frames: %d, period: %.2fs)",
-                averageLinesPerFrame, totalLineCount, frameCount, elapsedTime / 1000.0));
-
             // Reset counters
             totalLineCount = 0;
             frameCount = 0;
