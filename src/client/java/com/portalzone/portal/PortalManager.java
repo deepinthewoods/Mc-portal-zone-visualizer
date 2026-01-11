@@ -17,15 +17,19 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.NetherPortalBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3f;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -134,9 +138,16 @@ public class PortalManager {
     private double portalMarkerDrawDistance = INFINITE_DRAW_DISTANCE; // Default: infinite
     private double borderDrawDistance = 2048.0; // Default: 2048 blocks
 
+    // Connection line settings
+    private boolean showConnectionLines = true; // Default: show connection lines
+    private boolean connectionLinesAlwaysVisible = false; // Default: respect occlusion
+
     private PortalManager() {
         this.configPath = FabricLoader.getInstance().getConfigDir().resolve(CONFIG_FILE);
         loadSettings();
+        // Force Voronoi cache invalidation after loading settings
+        // This ensures the loaded LOD preset is applied correctly
+        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForLod0DistanceChange();
     }
 
     public static PortalManager getInstance() {
@@ -386,15 +397,43 @@ public class PortalManager {
             }
         }
 
-        // Remove invalid portals
+        // Remove invalid portals and clean up metadata
         for (UUID uuid : toRemove) {
             dimensionPersistedPortals.remove(uuid);
+            cleanupPortalMetadata(uuid);
+        }
+
+        // Also clean up portalsByDimension to remove invalid portals
+        Set<PortalInfo> livePortals = portalsByDimension.get(dimension);
+        if (livePortals != null) {
+            livePortals.removeIf(portal -> {
+                ChunkPos portalChunk = new ChunkPos(portal.position);
+                if (!portalChunk.equals(chunkPos)) {
+                    return false;
+                }
+                // Remove if invalid (not in persistedPortals or marked invalid)
+                boolean shouldRemove = !portal.isValid() || !dimensionPersistedPortals.containsKey(portal.uuid);
+                if (shouldRemove) {
+                    cleanupPortalMetadata(portal.uuid);
+                    portalsChanged = true;
+                }
+                return shouldRemove;
+            });
         }
 
         // Save changes if any portals were removed
         if (!toRemove.isEmpty()) {
             saveSettingsNow();
         }
+    }
+
+    /**
+     * Clean up metadata associated with a portal
+     */
+    private void cleanupPortalMetadata(UUID portalUuid) {
+        portalNames.remove(portalUuid);
+        portalHues.remove(portalUuid);
+        hiddenPortals.remove(portalUuid);
     }
 
     /**
@@ -665,6 +704,204 @@ public class PortalManager {
             allPortals.addAll(portals);
         }
         return allPortals;
+    }
+
+    /**
+     * Get the portal that the given portal connects to in the other dimension
+     * Minecraft portal linking is based on distance - each portal links to the closest portal in the other dimension
+     *
+     * @param sourcePortal The portal to find the link for
+     * @param currentDimension The current dimension we're rendering in
+     * @return Optional containing the linked portal, or empty if no link exists
+     */
+    public Optional<PortalInfo> getLinkedPortal(PortalInfo sourcePortal, ResourceKey<Level> currentDimension) {
+        ResourceKey<Level> targetDimension = sourcePortal.getLinkedDimension();
+
+        // Get all portals in the target dimension
+        Set<PortalInfo> targetPortals = getPortalsInDimension(targetDimension);
+
+        // Translate source portal position to target dimension's coordinate space
+        Vec3 sourcePosInTargetDim = translateBetweenDimensions(
+            sourcePortal.getCenterPos(),
+            sourcePortal.dimension,
+            targetDimension
+        );
+
+        // Find the closest portal in the target dimension (comparing in target dimension coords)
+        final Vec3 finalSourcePos = sourcePosInTargetDim;
+        return targetPortals.stream()
+            .filter(p -> !p.isSimulated())
+            .min(Comparator.comparingDouble(p -> {
+                Vec3 targetPos = p.getCenterPos();
+                return finalSourcePos.distanceTo(targetPos);
+            }));
+    }
+
+    /**
+     * Get all portals that the given portal links to, along with the average
+     * position of portal blocks that link to each destination.
+     *
+     * Minecraft portal linking is calculated per-block, not per-portal. Different
+     * portal blocks within the same portal structure can link to different destination
+     * portals based on their exact coordinates.
+     *
+     * @param sourcePortal The portal to find links for
+     * @param currentDimension The current dimension we're rendering in
+     * @return A map where the key is the destination portal and the value is the average
+     *         position (in current dimension coordinates) of portal blocks that link to it
+     */
+    public Map<PortalInfo, Vec3> getLinkedPortalsWithPositions(
+        PortalInfo sourcePortal,
+        ResourceKey<Level> currentDimension
+    ) {
+        ResourceKey<Level> targetDimension = sourcePortal.getLinkedDimension();
+        Set<PortalInfo> targetPortals = getPortalsInDimension(targetDimension);
+
+        // Remove simulated portals from consideration
+        targetPortals.removeIf(PortalInfo::isSimulated);
+
+        if (targetPortals.isEmpty()) {
+            return Map.of();
+        }
+
+        // Get all portal block positions for this portal
+        List<Vec3> portalBlockPositions = calculatePortalBlockPositions(sourcePortal);
+
+        // Group blocks by their destination portal
+        Map<PortalInfo, List<Vec3>> blocksByDestination = new HashMap<>();
+
+        for (Vec3 blockPos : portalBlockPositions) {
+            // Translate this block's position to target dimension
+            Vec3 translatedBlockPos = translateBetweenDimensions(
+                blockPos,
+                sourcePortal.dimension,
+                targetDimension
+            );
+
+            // Find the nearest portal in target dimension
+            PortalInfo nearestPortal = findNearestPortal(translatedBlockPos, targetPortals);
+
+            if (nearestPortal != null) {
+                blocksByDestination
+                    .computeIfAbsent(nearestPortal, k -> new ArrayList<>())
+                    .add(blockPos);
+            }
+        }
+
+        // Calculate average position for each destination group
+        Map<PortalInfo, Vec3> result = new HashMap<>();
+        for (Map.Entry<PortalInfo, List<Vec3>> entry : blocksByDestination.entrySet()) {
+            Vec3 avgPos = calculateAveragePosition(entry.getValue());
+
+            // If rendering in the other dimension, translate the average position
+            if (!currentDimension.equals(sourcePortal.dimension)) {
+                avgPos = translateBetweenDimensions(avgPos, sourcePortal.dimension, currentDimension);
+            }
+
+            result.put(entry.getKey(), avgPos);
+        }
+
+        return result;
+    }
+
+    /**
+     * Calculate all portal block positions for a portal structure
+     * Returns positions in the portal's native dimension coordinates
+     */
+    private List<Vec3> calculatePortalBlockPositions(PortalInfo portal) {
+        List<Vec3> positions = new ArrayList<>();
+        Vec3 center = portal.getCenterPos();
+
+        // Calculate offsets from center to bottom-left corner of portal
+        int halfWidth = portal.width / 2;
+        int halfHeight = portal.height / 2;
+
+        double offsetX, offsetZ;
+        if (portal.orientation == PortalInfo.Axis.X) {
+            offsetX = portal.width % 2 == 0 ? -halfWidth + 0.5 : -halfWidth;
+            offsetZ = portal.width % 2 == 0 ? -0.5 : 0;
+        } else { // Axis.Z
+            offsetX = portal.width % 2 == 0 ? -0.5 : 0;
+            offsetZ = portal.width % 2 == 0 ? -halfWidth + 0.5 : -halfWidth;
+        }
+
+        double offsetY = portal.height % 2 == 0 ? -halfHeight + 0.5 : -halfHeight;
+
+        Vec3 bottomCorner = new Vec3(
+            center.x + offsetX,
+            center.y + offsetY,
+            center.z + offsetZ
+        );
+
+        // Generate all portal block positions
+        for (int w = 0; w < portal.width; w++) {
+            for (int h = 0; h < portal.height; h++) {
+                Vec3 blockPos;
+                if (portal.orientation == PortalInfo.Axis.X) {
+                    blockPos = new Vec3(
+                        bottomCorner.x + w,
+                        bottomCorner.y + h,
+                        bottomCorner.z
+                    );
+                } else {
+                    blockPos = new Vec3(
+                        bottomCorner.x,
+                        bottomCorner.y + h,
+                        bottomCorner.z + w
+                    );
+                }
+                positions.add(blockPos);
+            }
+        }
+
+        return positions;
+    }
+
+    /**
+     * Find the nearest portal to a given position (in target dimension coordinates)
+     */
+    private PortalInfo findNearestPortal(Vec3 pos, Set<PortalInfo> portals) {
+        return portals.stream()
+            .min(Comparator.comparingDouble(p -> p.getCenterPos().distanceTo(pos)))
+            .orElse(null);
+    }
+
+    /**
+     * Calculate the average position of a list of positions
+     */
+    private Vec3 calculateAveragePosition(List<Vec3> positions) {
+        if (positions.isEmpty()) {
+            return Vec3.ZERO;
+        }
+
+        double sumX = 0, sumY = 0, sumZ = 0;
+        for (Vec3 pos : positions) {
+            sumX += pos.x;
+            sumY += pos.y;
+            sumZ += pos.z;
+        }
+
+        return new Vec3(
+            sumX / positions.size(),
+            sumY / positions.size(),
+            sumZ / positions.size()
+        );
+    }
+
+    /**
+     * Translate a position between dimensions
+     * Handles Nether <-> Overworld coordinate scaling (8:1)
+     */
+    private Vec3 translateBetweenDimensions(Vec3 pos, ResourceKey<Level> fromDim, ResourceKey<Level> toDim) {
+        if (fromDim.equals(toDim)) {
+            return pos;
+        }
+
+        // One is Nether, one is Overworld
+        boolean fromNether = Level.NETHER.equals(fromDim);
+        double scale = fromNether ? 8.0 : 0.125;
+
+        return new Vec3(pos.x * scale, pos.y, pos.z * scale);
     }
 
     /**
@@ -980,6 +1217,42 @@ public class PortalManager {
     }
 
     /**
+     * Set whether to show portal connection lines
+     */
+    public void setShowConnectionLines(boolean show) {
+        if (this.showConnectionLines == show) {
+            return;
+        }
+        this.showConnectionLines = show;
+        saveSettingsNow();
+    }
+
+    /**
+     * Get whether to show portal connection lines
+     */
+    public boolean isShowConnectionLines() {
+        return showConnectionLines;
+    }
+
+    /**
+     * Set whether connection lines should always be visible (no depth testing)
+     */
+    public void setConnectionLinesAlwaysVisible(boolean alwaysVisible) {
+        if (this.connectionLinesAlwaysVisible == alwaysVisible) {
+            return;
+        }
+        this.connectionLinesAlwaysVisible = alwaysVisible;
+        saveSettingsNow();
+    }
+
+    /**
+     * Get whether connection lines should always be visible (no depth testing)
+     */
+    public boolean isConnectionLinesAlwaysVisible() {
+        return connectionLinesAlwaysVisible;
+    }
+
+    /**
      * Clear all portals in the current dimension (removes from live and persisted)
      */
     public void clearCurrentDimension(ResourceKey<Level> dimension) {
@@ -1098,9 +1371,12 @@ public class PortalManager {
             if (root.has("lodPreset")) {
                 try {
                     String presetName = root.get("lodPreset").getAsString();
-                    lodPreset = com.portalzone.voronoi.VoronoiCalculator.LodPreset.valueOf(presetName);
+                    com.portalzone.voronoi.VoronoiCalculator.LodPreset loadedPreset =
+                        com.portalzone.voronoi.VoronoiCalculator.LodPreset.valueOf(presetName);
+                    // Use setter to ensure cache invalidation
+                    setLodPreset(loadedPreset);
                 } catch (Exception e) {
-                    lodPreset = com.portalzone.voronoi.VoronoiCalculator.LodPreset.HEAVY;
+                    setLodPreset(com.portalzone.voronoi.VoronoiCalculator.LodPreset.HEAVY);
                 }
             }
             if (root.has("portalMarkerDrawDistance")) {
@@ -1113,9 +1389,18 @@ public class PortalManager {
                 portalDiscoveryEnabled = root.get("portalDiscoveryEnabled").getAsBoolean();
             }
 
+            // Load connection line settings
+            if (root.has("showConnectionLines")) {
+                showConnectionLines = root.get("showConnectionLines").getAsBoolean();
+            }
+            if (root.has("connectionLinesAlwaysVisible")) {
+                connectionLinesAlwaysVisible = root.get("connectionLinesAlwaysVisible").getAsBoolean();
+            }
+
             // Load persisted portals
             JsonObject portalsJson = root.getAsJsonObject("portals");
             if (portalsJson != null) {
+                boolean anyPortalsLoaded = false;
                 for (Map.Entry<String, JsonElement> dimensionEntry : portalsJson.entrySet()) {
                     try {
                         // Parse dimension key
@@ -1132,6 +1417,7 @@ public class PortalManager {
                                 JsonObject portalJson = portalEntry.getValue().getAsJsonObject();
                                 PortalInfo portal = PortalInfo.fromJson(portalJson);
                                 portalMap.put(portalUuid, portal);
+                                anyPortalsLoaded = true;
                             } catch (Exception e) {
                                 // Silently skip failed portal loads
                             }
@@ -1142,11 +1428,17 @@ public class PortalManager {
                         // Silently skip failed dimension loads
                     }
                 }
+
+                // Trigger Voronoi recalculation if any portals were loaded
+                if (anyPortalsLoaded) {
+                    portalsChanged = true;
+                }
             }
 
             // Load simulated portals
             JsonObject simulatedJson = root.getAsJsonObject("simulatedPortals");
             if (simulatedJson != null) {
+                boolean anySimulatedLoaded = false;
                 for (Map.Entry<String, JsonElement> dimensionEntry : simulatedJson.entrySet()) {
                     try {
                         ResourceLocation dimLocation = ResourceLocation.parse(dimensionEntry.getKey());
@@ -1161,6 +1453,7 @@ public class PortalManager {
                                 JsonObject portalJson = portalEntry.getValue().getAsJsonObject();
                                 PortalInfo portal = PortalInfo.fromJson(portalJson);
                                 portalMap.put(portalUuid, portal);
+                                anySimulatedLoaded = true;
                             } catch (Exception e) {
                                 // Silently skip failed simulated portal loads
                             }
@@ -1170,6 +1463,11 @@ public class PortalManager {
                     } catch (Exception e) {
                         // Silently skip failed simulated dimension loads
                     }
+                }
+
+                // Trigger Voronoi recalculation if any simulated portals were loaded
+                if (anySimulatedLoaded) {
+                    portalsChanged = true;
                 }
             }
         } catch (Exception e) {
@@ -1210,6 +1508,10 @@ public class PortalManager {
         root.addProperty("portalMarkerDrawDistance", portalMarkerDrawDistance);
         root.addProperty("borderDrawDistance", borderDrawDistance);
         root.addProperty("portalDiscoveryEnabled", portalDiscoveryEnabled);
+
+        // Save connection line settings
+        root.addProperty("showConnectionLines", showConnectionLines);
+        root.addProperty("connectionLinesAlwaysVisible", connectionLinesAlwaysVisible);
 
         // Save persisted portals
         JsonObject portalsJson = new JsonObject();

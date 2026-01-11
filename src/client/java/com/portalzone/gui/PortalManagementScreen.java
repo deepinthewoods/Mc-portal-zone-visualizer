@@ -126,6 +126,32 @@ public class PortalManagementScreen extends BaseScreen {
         neutralBordersCheckbox.setChecked(manager.isNeutralBordersEnabled());
         neutralBordersCheckbox.setListener((checkBox) -> manager.setNeutralBordersEnabled(checkBox.isChecked()));
         this.addWidget(neutralBordersCheckbox);
+        y += 15;
+
+        // Show connection lines checkbox
+        WidgetCheckBox showConnectionLinesCheckbox = new WidgetCheckBox(
+            x,
+            y,
+            MaLiLibIcons.MINUS,
+            MaLiLibIcons.PLUS,
+            "Show Connection Lines"
+        );
+        showConnectionLinesCheckbox.setChecked(manager.isShowConnectionLines());
+        showConnectionLinesCheckbox.setListener((checkBox) -> manager.setShowConnectionLines(checkBox.isChecked()));
+        this.addWidget(showConnectionLinesCheckbox);
+        y += 15;
+
+        // Connection lines always visible checkbox
+        WidgetCheckBox connectionLinesAlwaysVisibleCheckbox = new WidgetCheckBox(
+            x,
+            y,
+            MaLiLibIcons.MINUS,
+            MaLiLibIcons.PLUS,
+            "Connection Lines Always Visible"
+        );
+        connectionLinesAlwaysVisibleCheckbox.setChecked(manager.isConnectionLinesAlwaysVisible());
+        connectionLinesAlwaysVisibleCheckbox.setListener((checkBox) -> manager.setConnectionLinesAlwaysVisible(checkBox.isChecked()));
+        this.addWidget(connectionLinesAlwaysVisibleCheckbox);
 
         // Minimum marker size slider
         y += 20;
@@ -310,12 +336,23 @@ public class PortalManagementScreen extends BaseScreen {
                                     java.util.function.DoubleSupplier supplier,
                                     java.util.function.DoubleConsumer consumer,
                                     String label, double min, double max) {
+        createDoubleSlider(x, y, supplier, consumer, label, min, max, false);
+    }
+
+    private void createDoubleSlider(int x, int y,
+                                    java.util.function.DoubleSupplier supplier,
+                                    java.util.function.DoubleConsumer consumer,
+                                    String label, double min, double max, boolean showDecimals) {
         WidgetLabel labelWidget = new WidgetLabel(x + 12, y, 200, 10, 0xFFFFFFFF, label);
         this.addWidget(labelWidget);
         y += 10;
 
         GuiTextFieldDouble textField = new GuiTextFieldDouble(x + 12, y, 60, 16, this.textRenderer);
-        textField.setTextWrapper(String.valueOf((int)supplier.getAsDouble()));
+        if (showDecimals) {
+            textField.setTextWrapper(String.format("%.1f", supplier.getAsDouble()));
+        } else {
+            textField.setTextWrapper(String.valueOf((int)supplier.getAsDouble()));
+        }
 
         WidgetSlider slider = new WidgetSlider(
             x + 74,
@@ -325,7 +362,7 @@ public class PortalManagementScreen extends BaseScreen {
             new ISliderCallback() {
                 @Override
                 public int getMaxSteps() {
-                    return (int)(max - min);
+                    return showDecimals ? (int)((max - min) * 10) : (int)(max - min);
                 }
 
                 @Override
@@ -337,11 +374,18 @@ public class PortalManagementScreen extends BaseScreen {
                 public void setValueRelative(double value) {
                     double actualValue = min + (value * (max - min));
                     consumer.accept(actualValue);
-                    textField.setTextWrapper(String.valueOf((int)actualValue));
+                    if (showDecimals) {
+                        textField.setTextWrapper(String.format("%.1f", actualValue));
+                    } else {
+                        textField.setTextWrapper(String.valueOf((int)actualValue));
+                    }
                 }
 
                 @Override
                 public String getFormattedDisplayValue() {
+                    if (showDecimals) {
+                        return String.format("%.1f", supplier.getAsDouble());
+                    }
                     return String.valueOf((int)supplier.getAsDouble());
                 }
             }
@@ -356,7 +400,11 @@ public class PortalManagementScreen extends BaseScreen {
                     double value = Double.parseDouble(text);
                     double clamped = Math.max(min, Math.min(max, value));
                     if (clamped != value) {
-                        field.setTextWrapper(String.valueOf((int)clamped));
+                        if (showDecimals) {
+                            field.setTextWrapper(String.format("%.1f", clamped));
+                        } else {
+                            field.setTextWrapper(String.valueOf((int)clamped));
+                        }
                     }
                     consumer.accept(clamped);
                 } catch (NumberFormatException ignored) {

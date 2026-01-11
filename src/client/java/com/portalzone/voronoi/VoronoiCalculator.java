@@ -142,6 +142,13 @@ public class VoronoiCalculator {
             cachedPortalConfigHash = 0L;
         }
 
+        // Check for source dimension change (e.g., flip borders key) and clear cached buckets
+        if (cachedSourceDimension != null && !sourceDim.equals(cachedSourceDimension)) {
+            cachedBuckets.set(createEmptyBuckets());
+            chunkCache.invalidateAll();
+            cachedPortalConfigHash = 0L;
+        }
+
         // Recalculate if portals have changed, dimension changed, or player moved significantly
         double recalcDistanceThreshold = getRecalcDistanceThreshold();
         boolean needsRecalc = PortalManager.getInstance().hasPortalsChanged()
@@ -515,7 +522,9 @@ public class VoronoiCalculator {
         }
 
         // Handle final LOD level beyond configured radii
-        if (minRadius < maxDistance) {
+        // Skip for NONE preset (single LOD level already covers entire range)
+        boolean isNonePreset = (getBaseLodRadii().length == 0 && getLodSpacing().length == 1);
+        if (!isNonePreset && minRadius < maxDistance) {
             int lodLevel = getFinalLodLevel();
             Set<ChunkCoord> requiredChunks = ChunkBoundaryCalculator.getRequiredChunks(
                 request.playerPos, maxDistance, chunkSize, WORLD_MIN_Y, WORLD_MAX_Y);
@@ -620,6 +629,15 @@ public class VoronoiCalculator {
         int[] baseLodRadii = getBaseLodRadii();
 
         int clamped = Math.max(4, Math.min(MAX_BORDER_DISTANCE, lod0Max));
+
+        // Special case for NONE preset: single LOD level covering entire range
+        if (baseLodRadii.length == 0 && lodSpacing.length == 1) {
+            // NONE preset - use Border Draw Distance as the single LOD radius
+            // This ensures Full Detail renders everything within the user's configured distance
+            int borderDrawDistance = (int) PortalManager.getInstance().getBorderDrawDistance();
+            return new int[] { Math.max(MAX_BORDER_DISTANCE, borderDrawDistance) };
+        }
+
         int[] radii = new int[lodSpacing.length];
         radii[0] = clamped;
         for (int i = 1; i < radii.length; i++) {
@@ -823,7 +841,7 @@ public class VoronoiCalculator {
             this.spacing = spacing;
             this.alwaysRender = spacing == 1;
             this.lodLevel = lodLevel;
-            this.hash = hashEdge(this.start, this.end, spacing);
+            this.hash = hashEdge(this.start, this.end, spacing, lodLevel);
         }
 
         private static boolean shouldSwap(Vec3 a, Vec3 b) {
@@ -1452,7 +1470,7 @@ public class VoronoiCalculator {
         }
     }
 
-    private static int hashEdge(Vec3 start, Vec3 end, int spacing) {
+    private static int hashEdge(Vec3 start, Vec3 end, int spacing, int lodLevel) {
         int h = 0x811c9dc5;
         h = (h ^ quantize(start.x)) * 0x01000193;
         h = (h ^ quantize(start.y)) * 0x01000193;
@@ -1461,6 +1479,7 @@ public class VoronoiCalculator {
         h = (h ^ quantize(end.y)) * 0x01000193;
         h = (h ^ quantize(end.z)) * 0x01000193;
         h = (h ^ spacing) * 0x01000193; // Include spacing to differentiate LOD levels
+        h = (h ^ lodLevel) * 0x01000193; // Include lodLevel to prevent collisions
         return h;
     }
 
@@ -1490,6 +1509,15 @@ public class VoronoiCalculator {
         if (PortalManager.getInstance().isSimulatePortalHeld()) {
             return 1.0;
         }
+
+        // For NONE preset (Full Detail), use much larger threshold to avoid constant recalculation
+        // With spacing=1, calculation is very expensive so we don't want to retrigger on small movements
+        LodPreset preset = getCurrentLodPreset();
+        if (preset == LodPreset.NONE) {
+            // Use chunk size as threshold - only recalc when moving to a new chunk region
+            return 128.0;
+        }
+
         return PortalManager.getInstance().getLod0Distance() * 0.25;
     }
 
@@ -1502,6 +1530,11 @@ public class VoronoiCalculator {
     }
 
     private static boolean isSegmentInLodRange(EdgeSegment segment, double distance, int[] lodRadii) {
+        // For single-level LOD (NONE preset), all segments are always in range
+        if (lodRadii.length == 1 && segment.lodLevel == 0) {
+            return true;
+        }
+
         if (segment.lodLevel <= 0) {
             return distance <= lodRadii[0];
         }

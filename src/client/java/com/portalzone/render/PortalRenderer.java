@@ -27,6 +27,7 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.Set;
 
@@ -37,12 +38,18 @@ public class PortalRenderer {
     private static final int FULLBRIGHT = 0x00F000F0;
     private static final float BORDER_LINE_WIDTH = 3.0f;
     private static final float MARKER_LINE_WIDTH = 8.0f;
+    private static final float CONNECTION_LINE_WIDTH = 2.0f;
     private static final Vector3f HIDDEN_PORTAL_COLOR = new Vector3f(0.6f, 0.6f, 0.6f);
     private static final RenderType LINES_DEPTH = createLines(true, BORDER_LINE_WIDTH, "portal_zone_lines");
     private static final RenderType LINES_NO_DEPTH = createLines(false, BORDER_LINE_WIDTH, "portal_zone_lines_no_depth");
     private static final RenderType MARKER_LINES_DEPTH = createLines(true, MARKER_LINE_WIDTH, "portal_zone_marker_lines");
     private static final RenderType MARKER_LINES_NO_DEPTH = createLines(false, MARKER_LINE_WIDTH, "portal_zone_marker_lines_no_depth");
     private static final List<LabelEntry> LABELS = new ArrayList<>();
+
+    // Connection line animation state
+    private static double connectionLineAnimOffset = 0;
+    private static final int CONNECTION_SEGMENT_LENGTH = 3; // World units per segment
+    private static final double CONNECTION_LINE_OFFSET = 0.5; // Offset for bidirectional lines
 
     // Line counting for performance monitoring
     private static int lineCountThisFrame = 0;
@@ -71,6 +78,30 @@ public class PortalRenderer {
 
         // Render Voronoi borders first (with depth control)
         VoronoiCalculator.getInstance().render(matrices, bufferSource, camPos, currentDim, camera);
+
+        // Render portal connection lines after borders but before markers
+        // Connection lines always use NO_DEPTH for visibility through walls
+        boolean connectionLinesAlwaysVisible = PortalManager.getInstance().isConnectionLinesAlwaysVisible();
+
+        if (connectionLinesAlwaysVisible) {
+            // Flush border buffers before changing depth range
+            if (bufferSource instanceof MultiBufferSource.BufferSource source) {
+                source.endBatch(LINES_DEPTH);
+                source.endBatch(LINES_NO_DEPTH);
+            }
+            GL11.glDepthRange(0.0, 0.01);
+        }
+
+        renderPortalConnectionLines(matrices, bufferSource, camPos, currentDim, camera);
+
+        if (connectionLinesAlwaysVisible) {
+            // Flush connection line buffers before restoring depth range
+            if (bufferSource instanceof MultiBufferSource.BufferSource source) {
+                source.endBatch(LINES_DEPTH);
+                source.endBatch(LINES_NO_DEPTH);
+            }
+            GL11.glDepthRange(0.0, 1.0);
+        }
 
         // Render portal markers with depth control (after borders so they're on top)
         boolean portalMarkersAlwaysVisible = PortalManager.getInstance().isPortalMarkersAlwaysVisible();
@@ -422,6 +453,161 @@ public class PortalRenderer {
 
         // Restore pose stack state
         matrices.popPose();
+    }
+
+    /**
+     * Render portal connection lines showing which portal each portal connects to
+     * Uses a 3-phase dashed pattern with animation
+     * Renders both: currentDim→otherDim AND otherDim→currentDim
+     * Always uses NO_DEPTH testing for visibility through walls
+     */
+    private static void renderPortalConnectionLines(PoseStack matrices, MultiBufferSource bufferSource,
+                                                    Vec3 camPos, ResourceKey<Level> currentDim,
+                                                    Camera camera) {
+        PortalManager manager = PortalManager.getInstance();
+
+        // Check if connection lines are enabled
+        if (!manager.isShowConnectionLines()) {
+            return;
+        }
+
+        // Update animation offset based on time
+        // Animate: cycles through 9 units (3 phases x 3 units) over time
+        // Negative for reverse direction (towards destination)
+        long currentTime = System.currentTimeMillis();
+        connectionLineAnimOffset = ((-currentTime / 50.0) % 9.0);
+
+        // Get the other dimension
+        ResourceKey<Level> otherDim = currentDim == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
+
+        // Render connection lines from current dimension portals to other dimension
+        Set<PortalInfo> currentDimPortals = manager.getPortalsInDimension(currentDim);
+        for (PortalInfo portal : currentDimPortals) {
+            if (portal.isSimulated()) {
+                continue;
+            }
+
+            // Find all linked portals in the other dimension (per-block linking)
+            Map<PortalInfo, Vec3> linkedPortals = manager.getLinkedPortalsWithPositions(portal, currentDim);
+
+            for (Map.Entry<PortalInfo, Vec3> entry : linkedPortals.entrySet()) {
+                PortalInfo linkedPortal = entry.getKey();
+                Vec3 startPos = entry.getValue(); // Average position of blocks linking to this destination
+                Vec3 endPos = linkedPortal.getTranslatedPos(); // Already translated to current dimension
+
+                // Check draw distances for both portals
+                if (!isWithinDrawDistance(startPos, camPos, manager) ||
+                    !isWithinDrawDistance(endPos, camPos, manager)) {
+                    continue;
+                }
+
+                // Get color for this portal
+                Vector3f color = manager.isPortalHidden(portal)
+                    ? HIDDEN_PORTAL_COLOR
+                    : manager.getPortalColor(portal);
+
+                // No offset for lines originating from current dimension
+                drawDashedLine(matrices, bufferSource, startPos, endPos, color, false);
+            }
+        }
+
+        // Render connection lines from other dimension portals back to current dimension
+        Set<PortalInfo> otherDimPortals = manager.getPortalsInDimension(otherDim);
+        for (PortalInfo portal : otherDimPortals) {
+            if (portal.isSimulated()) {
+                continue;
+            }
+
+            // Find all linked portals in the current dimension (per-block linking)
+            Map<PortalInfo, Vec3> linkedPortals = manager.getLinkedPortalsWithPositions(portal, currentDim);
+
+            for (Map.Entry<PortalInfo, Vec3> entry : linkedPortals.entrySet()) {
+                PortalInfo linkedPortal = entry.getKey();
+                Vec3 startPos = entry.getValue(); // Average position of blocks linking to this destination (already translated)
+                Vec3 endPos = linkedPortal.getCenterPos();
+
+                // Check draw distances for both portals
+                if (!isWithinDrawDistance(startPos, camPos, manager) ||
+                    !isWithinDrawDistance(endPos, camPos, manager)) {
+                    continue;
+                }
+
+                // Get color for this portal
+                Vector3f color = manager.isPortalHidden(portal)
+                    ? HIDDEN_PORTAL_COLOR
+                    : manager.getPortalColor(portal);
+
+                // Apply offset for lines originating from other dimension (so bidirectional pairs don't overlap)
+                drawDashedLine(matrices, bufferSource, startPos, endPos, color, true);
+            }
+        }
+    }
+
+    /**
+     * Draw a dashed line from startPos to endPos with 3-phase pattern
+     * Pattern: draw-don't draw-don't draw (each phase is 3 units)
+     * Always uses NO_DEPTH testing for visibility through walls
+     */
+    private static void drawDashedLine(PoseStack matrices, MultiBufferSource bufferSource,
+                                       Vec3 startPos, Vec3 endPos, Vector3f color,
+                                       boolean applyOffset) {
+        Vec3 lineDir = endPos.subtract(startPos);
+        double lineLength = lineDir.length();
+        Vec3 normalizedDir = lineDir.normalize();
+
+        // Apply perpendicular offset for bidirectional lines
+        if (applyOffset) {
+            // Calculate perpendicular direction (in XZ plane for horizontal offset)
+            Vec3 perpDir = new Vec3(-normalizedDir.z, 0, normalizedDir.x).normalize().scale(CONNECTION_LINE_OFFSET);
+            startPos = startPos.add(perpDir);
+            endPos = endPos.add(perpDir);
+        }
+
+        // Pattern: draw (3 units), gap (3 units), gap (3 units) = 9 units total
+        int patternLength = CONNECTION_SEGMENT_LENGTH * 3;
+
+        // Calculate starting offset based on animation
+        double startOffset = connectionLineAnimOffset % patternLength;
+
+        double distance = -startOffset;
+        int segmentIndex = 0;
+
+        while (distance < lineLength) {
+            // Determine if this segment should be drawn (3-phase pattern)
+            // Segment 0: draw, Segments 1&2: gap
+            boolean shouldDraw = (segmentIndex % 3 == 0);
+
+            if (shouldDraw && distance >= 0) {
+                double segStart = Math.max(0, distance);
+                double segEnd = Math.min(lineLength, distance + CONNECTION_SEGMENT_LENGTH);
+
+                if (segEnd > segStart) {
+                    Vec3 p1 = startPos.add(normalizedDir.scale(segStart));
+                    Vec3 p2 = startPos.add(normalizedDir.scale(segEnd));
+
+                    // Always use false for depth testing (visible through walls)
+                    submitLine(matrices, bufferSource, color.x, color.y, color.z, 0.6f, FULLBRIGHT,
+                        p1.x, p1.y, p1.z,
+                        p2.x, p2.y, p2.z,
+                        new Vector3f((float)normalizedDir.x, (float)normalizedDir.y, (float)normalizedDir.z),
+                        false);
+                }
+            }
+
+            distance += CONNECTION_SEGMENT_LENGTH;
+            segmentIndex++;
+        }
+    }
+
+    /**
+     * Check if a position is within draw distance
+     */
+    private static boolean isWithinDrawDistance(Vec3 pos, Vec3 camPos, PortalManager manager) {
+        if (manager.isPortalMarkerDrawDistanceInfinite()) {
+            return true;
+        }
+        double distance = pos.distanceTo(camPos);
+        return distance <= manager.getPortalMarkerDrawDistance();
     }
 
     private static RenderType createLines(boolean useDepthTest, float lineWidth, String name) {
