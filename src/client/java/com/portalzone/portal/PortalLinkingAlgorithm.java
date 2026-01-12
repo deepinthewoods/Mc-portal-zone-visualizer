@@ -14,22 +14,22 @@ public class PortalLinkingAlgorithm {
 
     /**
      * Search radius for finding linked portals in the Nether dimension.
-     * When linking to existing portals, Minecraft searches 128 blocks in the Nether.
+     * When linking to existing portals, Minecraft searches 16 blocks in the Nether.
+     * Changed in Java Edition 1.16.2 snapshot 20w28a to account for 1:8 position scale.
      */
-    public static final int SEARCH_RADIUS_NETHER = 128;
+    public static final int SEARCH_RADIUS_NETHER = 16;
 
     /**
      * Search radius for finding linked portals in the Overworld dimension.
-     * When linking to existing portals, Minecraft searches 1024 blocks in the Overworld.
-     * Note: The 16-block radius is only used for portal creation, not linking.
+     * When linking to existing portals, Minecraft searches 128 blocks in the Overworld.
      */
-    public static final int SEARCH_RADIUS_OVERWORLD = 1024;
+    public static final int SEARCH_RADIUS_OVERWORLD = 128;
 
     /**
      * Find which portal a position would link to in the destination dimension.
      * This simulates Minecraft's portal linking behavior:
      * 1. Translates coordinates based on dimension scaling (8:1 Nether:Overworld)
-     * 2. Searches for portals within a radius (128 in Nether, 1024 in Overworld)
+     * 2. Searches for portals within a radius (16 in Nether, 128 in Overworld)
      * 3. Returns the nearest portal within the search radius
      * 4. Returns null if no portal exists in range (would create new portal)
      *

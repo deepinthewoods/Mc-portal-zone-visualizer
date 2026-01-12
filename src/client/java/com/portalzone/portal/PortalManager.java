@@ -86,7 +86,6 @@ public class PortalManager {
     // Depth testing settings
     private boolean portalMarkersAlwaysVisible = true; // Default: always visible
     private boolean bordersAlwaysVisible = false; // Default: respect occlusion
-    private boolean showNeutralBorders = true; // Default: show grey borders
     private float minimumMarkerScreenPercent = 2.0f; // Default: 2% of long screen side
     private LineRenderPreset lineRenderPreset = LineRenderPreset.FULL; // Default: render all lines
     private int lod0Distance = 64; // Default: LOD 0 radius in blocks
@@ -1041,27 +1040,6 @@ public class PortalManager {
         return portalDiscoveryEnabled;
     }
 
-    /**
-     * Set whether neutral (grey) borders should be rendered
-     */
-    public void setNeutralBordersEnabled(boolean enabled) {
-        if (this.showNeutralBorders == enabled) {
-            return;
-        }
-        this.showNeutralBorders = enabled;
-        portalsChanged = true;
-        // Invalidate chunk cache since neutral borders affect border visibility
-        com.portalzone.voronoi.VoronoiCalculator.getInstance().invalidateCacheForNeutralBordersChange();
-        saveSettingsNow();
-    }
-
-    /**
-     * Get whether neutral (grey) borders should be rendered
-     */
-    public boolean isNeutralBordersEnabled() {
-        return showNeutralBorders;
-    }
-
 
     /**
      * Set the minimum portal marker screen size (percent of long screen side)
@@ -1273,6 +1251,31 @@ public class PortalManager {
         hiddenPortals.clear();
         portalsChanged = true;
         saveSettingsNow();
+
+        // Re-queue all currently loaded chunks for scanning
+        Minecraft mc = Minecraft.getInstance();
+        ClientLevel level = mc.level;
+        if (level != null && portalDiscoveryEnabled) {
+            queueLoadedChunksAroundPlayer(level);
+        }
+    }
+
+    /**
+     * Get the current scan queue size
+     */
+    public int getScanQueueSize() {
+        return scanQueue.size();
+    }
+
+    /**
+     * Get the total number of pending scans across all dimensions
+     */
+    public int getTotalPendingScans() {
+        int total = 0;
+        for (Map<ChunkPos, ScanMode> pending : pendingScans.values()) {
+            total += pending.size();
+        }
+        return total;
     }
 
     private void loadSettings() {
@@ -1311,9 +1314,6 @@ public class PortalManager {
             }
             if (root.has("bordersAlwaysVisible")) {
                 bordersAlwaysVisible = root.get("bordersAlwaysVisible").getAsBoolean();
-            }
-            if (root.has("showNeutralBorders")) {
-                showNeutralBorders = root.get("showNeutralBorders").getAsBoolean();
             }
             if (root.has("minimumMarkerScreenPercent")) {
                 setMinimumMarkerScreenPercent(root.get("minimumMarkerScreenPercent").getAsFloat());
@@ -1476,7 +1476,6 @@ public class PortalManager {
         // Save depth testing settings
         root.addProperty("portalMarkersAlwaysVisible", portalMarkersAlwaysVisible);
         root.addProperty("bordersAlwaysVisible", bordersAlwaysVisible);
-        root.addProperty("showNeutralBorders", showNeutralBorders);
         root.addProperty("minimumMarkerScreenPercent", minimumMarkerScreenPercent);
         root.addProperty("lineRenderPreset", lineRenderPreset.name());
         root.addProperty("lod0Distance", lod0Distance);

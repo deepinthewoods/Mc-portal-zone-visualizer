@@ -23,10 +23,29 @@ public class ClientLevelMixin {
 
         ClientLevel level = (ClientLevel) (Object) this;
         BlockState oldState = level.getBlockState(pos);
-        if (!oldState.is(Blocks.NETHER_PORTAL) && !state.is(Blocks.NETHER_PORTAL)) {
+
+        // Check if this is a portal block change
+        boolean isPortalBlockChange = oldState.is(Blocks.NETHER_PORTAL) || state.is(Blocks.NETHER_PORTAL);
+
+        // Check if this is an obsidian block being broken (portal frame destruction)
+        boolean isObsidianBreak = oldState.is(Blocks.OBSIDIAN) && !state.is(Blocks.OBSIDIAN);
+
+        if (!isPortalBlockChange && !isObsidianBreak) {
             return;
         }
 
-        manager.invalidateChunk(level.dimension(), new ChunkPos(pos));
+        // Invalidate the chunk containing the changed block
+        ChunkPos chunkPos = new ChunkPos(pos);
+        manager.invalidateChunk(level.dimension(), chunkPos);
+
+        // Also invalidate neighboring chunks to catch portals whose center is in an adjacent chunk
+        // Portals can span multiple chunks, so we need to check a 3x3 grid
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue; // Already invalidated the center chunk
+                ChunkPos neighborPos = new ChunkPos(chunkPos.x + dx, chunkPos.z + dz);
+                manager.invalidateChunk(level.dimension(), neighborPos);
+            }
+        }
     }
 }

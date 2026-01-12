@@ -450,11 +450,9 @@ public class VoronoiCalculator {
         long startTime = System.currentTimeMillis();
 
         // Get current portal configuration hash
-        boolean neutralBorders = PortalManager.getInstance().isNeutralBordersEnabled();
         long portalConfigHash = PortalConfigHasher.calculatePortalConfigHash(
             request.portalCenters, request.portalColors,
-            new boolean[request.portalCenters.length], // All visible in request
-            neutralBorders);
+            new boolean[request.portalCenters.length]); // All visible in request
 
         // Calculate dynamic max distance based on portal locations
         int maxDistance = calculateMaxDistance(request.portalTranslated, request.playerPos);
@@ -663,9 +661,17 @@ public class VoronoiCalculator {
     /**
      * Find which portal would be linked from a given position using Minecraft's portal linking algorithm
      * Returns the index in the portal list, or -1 if no portal is within the search radius
+     *
+     * OPTION 3 IMPLEMENTATION: Always performs calculations in the destination dimension's native coordinate space.
+     * This exactly mirrors Minecraft's portal linking algorithm:
+     * 1. Translate query position from currentDim to sourceDim (destination dimension)
+     * 2. Search for portals in sourceDim using sourceDim's native coordinates
+     * 3. Use sourceDim's search radius (128 for Nether, 1024 for Overworld)
+     * 4. Return nearest portal in sourceDim coordinate space
      */
     private int findNearestPortalIndex(double x, double y, double z,
                                        ResourceKey<Level> currentDim,
+                                       ResourceKey<Level> sourceDim,
                                        Vec3[] destinationPortals,
                                        double[] portalX, double[] portalY, double[] portalZ,
                                        boolean useLinkingAlgorithm) {
@@ -674,6 +680,7 @@ public class VoronoiCalculator {
         }
 
         if (!useLinkingAlgorithm) {
+            // Simple nearest neighbor (when sourceDim == currentDim)
             int nearestIndex = -1;
             double nearestDistance = Double.MAX_VALUE;
             for (int i = 0; i < destinationPortals.length; i++) {
@@ -689,19 +696,22 @@ public class VoronoiCalculator {
             return nearestIndex;
         }
 
-        // Compare in current dimension coordinates
-        // The portals are already translated to current dimension coordinates
-        // Use the current dimension's search radius for portal linking
-        Vec3 sourcePos = new Vec3(x, y, z);
-        int searchRadius = PortalLinkingAlgorithm.getSearchRadius(currentDim);
+        // OPTION 3: Simulate Minecraft's portal linking algorithm precisely
+        // Step 1: Translate query position from currentDim to sourceDim coordinates
+        Vec3 queryPos = new Vec3(x, y, z);
+        Vec3 translatedQueryPos = PortalLinkingAlgorithm.translateCoordinates(queryPos, currentDim);
 
+        // Step 2: Use sourceDim's search radius (the dimension where portals actually exist)
+        int searchRadius = PortalLinkingAlgorithm.getSearchRadius(sourceDim);
+
+        // Step 3: Search for portals in sourceDim's native coordinate space
         int nearestIndex = -1;
         double nearestDistance = Double.MAX_VALUE;
         for (int i = 0; i < destinationPortals.length; i++) {
-            // destinationPortals are already translated to current dimension coordinates
-            double horizontal = PortalLinkingAlgorithm.horizontalDistance(sourcePos, destinationPortals[i]);
+            // destinationPortals are now in their NATIVE sourceDim coordinates (not translated)
+            double horizontal = PortalLinkingAlgorithm.horizontalDistance(translatedQueryPos, destinationPortals[i]);
             if (horizontal <= searchRadius) {
-                double distance = PortalLinkingAlgorithm.distance3d(sourcePos, destinationPortals[i]);
+                double distance = PortalLinkingAlgorithm.distance3d(translatedQueryPos, destinationPortals[i]);
                 if (distance < nearestDistance) {
                     nearestDistance = distance;
                     nearestIndex = i;
@@ -769,7 +779,8 @@ public class VoronoiCalculator {
 
         int i = 0;
         for (PortalInfo portal : visibleAndHiddenPortals) {
-            Vec3 pos = sourceDim.equals(currentDim) ? portal.getCenterPos() : portal.getTranslatedPos();
+            // Use native coordinates for hash calculation (must match buildRecalcRequest)
+            Vec3 pos = portal.getCenterPos();
             portalPositions[i] = pos;
             portalColors[i] = portalManager.getPortalColor(portal);
             hiddenStates[i] = portalManager.isPortalHidden(portal);
@@ -780,30 +791,24 @@ public class VoronoiCalculator {
         if (simulateHeld) {
             Minecraft mc = Minecraft.getInstance();
             Vec3 playerPos = mc.player != null ? mc.player.position() : Vec3.ZERO;
-            portalPositions[i] = playerPos;
+            // Translate player position to sourceDim for hash calculation (must match buildRecalcRequest)
+            Vec3 playerPosInSourceDim = sourceDim.equals(currentDim)
+                ? playerPos
+                : PortalLinkingAlgorithm.translateCoordinates(playerPos, currentDim);
+            portalPositions[i] = playerPosInSourceDim;
             portalColors[i] = new Vector3f(1.0f, 1.0f, 1.0f);
             hiddenStates[i] = false;
         }
 
         // Calculate hash
-        boolean neutralBorders = portalManager.isNeutralBordersEnabled();
         long newHash = PortalConfigHasher.calculatePortalConfigHash(
-            portalPositions, portalColors, hiddenStates, neutralBorders);
+            portalPositions, portalColors, hiddenStates);
 
         // Check if hash changed
         if (cachedPortalConfigHash != newHash) {
             chunkCache.invalidateAll();
             cachedPortalConfigHash = newHash;
         }
-    }
-
-    /**
-     * Called by PortalManager when neutral borders setting changes.
-     * Invalidates all cached chunks since border visibility changes.
-     */
-    public void invalidateCacheForNeutralBordersChange() {
-        chunkCache.invalidateAll();
-        cachedPortalConfigHash = 0L; // Force recalculation of hash
     }
 
 
@@ -1019,7 +1024,7 @@ public class VoronoiCalculator {
                         }
                     }
 
-                    int nearest = findNearestPortalIndex(x, y, z, request.currentDim,
+                    int nearest = findNearestPortalIndex(x, y, z, request.currentDim, request.sourceDim,
                         request.portalCenters, portalX, portalY, portalZ, request.useLinkingAlgorithm);
                     nearestPortalIdx[index] = nearest;
                 }
@@ -1044,19 +1049,19 @@ public class VoronoiCalculator {
                         int neighborIdx = ((ix + 1) * yCount + iy) * zCount + iz;
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x + spacing, y, z, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, lodLevel);
+                            request.portalCenters, request.portalColors, lodLevel);
                     }
                     if (iy + 1 < yCount) {
                         int neighborIdx = (ix * yCount + (iy + 1)) * zCount + iz;
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y + spacing, z, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, lodLevel);
+                            request.portalCenters, request.portalColors, lodLevel);
                     }
                     if (iz + 1 < zCount) {
                         int neighborIdx = (ix * yCount + iy) * zCount + (iz + 1);
                         checkNeighborAndAddToBucket(bucketMap, nearestPortalIdx, index, neighborIdx,
                             x, y, z, x, y, z + spacing, spacing,
-                            request.portalCenters, request.portalColors, request.showNeutralBorders, lodLevel);
+                            request.portalCenters, request.portalColors, lodLevel);
                     }
                 }
             }
@@ -1151,7 +1156,7 @@ public class VoronoiCalculator {
                                              int index1, int index2,
                                              int x1, int y1, int z1, int x2, int y2, int z2, int spacing,
                                              Vec3[] portalCenters, Vector3f[] portalColors,
-                                             boolean showNeutralBorders, int lodLevel) {
+                                             int lodLevel) {
         int portal1 = nearestPortalIdx[index1];
         int portal2 = nearestPortalIdx[index2];
 
@@ -1174,9 +1179,7 @@ public class VoronoiCalculator {
         // Determine colors
         Vector3f color1, color2;
         if (portal1 == -1 || portal2 == -1) {
-            if (!showNeutralBorders) {
-                return;
-            }
+            // Always show neutral (grey) borders for zones outside portal search radii
             color1 = portal1 == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal1];
             color2 = portal2 == -1 ? NEUTRAL_ZONE_COLOR : portalColors[portal2];
         } else {
@@ -1561,10 +1564,7 @@ public class VoronoiCalculator {
         if (latest.simulateHeld != request.simulateHeld) {
             return true;
         }
-        if (latest.useLinkingAlgorithm != request.useLinkingAlgorithm) {
-            return true;
-        }
-        return latest.showNeutralBorders != request.showNeutralBorders;
+        return latest.useLinkingAlgorithm != request.useLinkingAlgorithm;
     }
 
     private static ResourceKey<Level> getSourceDimension(ResourceKey<Level> currentDim) {
@@ -1590,7 +1590,6 @@ public class VoronoiCalculator {
             return null;
         }
 
-        boolean showNeutralBorders = portalManager.isNeutralBordersEnabled();
         boolean useLinkingAlgorithm = !sourceDim.equals(currentDim);
 
         int count = visiblePortals.size() + extraPortals;
@@ -1599,23 +1598,30 @@ public class VoronoiCalculator {
         Vector3f[] colors = new Vector3f[count];
         int i = 0;
         for (PortalInfo portal : visiblePortals) {
-            Vec3 pos = sourceDim.equals(currentDim) ? portal.getCenterPos() : portal.getTranslatedPos();
-            centers[i] = pos;
-            translated[i] = pos;
+            // Always use native coordinates for centers (Option 3: correct coordinate space)
+            Vec3 nativePos = portal.getCenterPos();
+            centers[i] = nativePos;
+            // Translated positions are used for max distance calculations
+            translated[i] = sourceDim.equals(currentDim) ? nativePos : portal.getTranslatedPos();
             Vector3f color = portalManager.getPortalColor(portal);
             colors[i] = new Vector3f(color);
             i++;
         }
 
         if (simulateHeld) {
-            centers[i] = playerPos;
-            translated[i] = playerPos;
+            // Simulated portal at player position
+            // Need to translate player position to sourceDim for centers
+            Vec3 playerPosInSourceDim = sourceDim.equals(currentDim)
+                ? playerPos
+                : PortalLinkingAlgorithm.translateCoordinates(playerPos, currentDim);
+            centers[i] = playerPosInSourceDim;
+            translated[i] = playerPos; // Keep in currentDim for distance calculations
             colors[i] = new Vector3f(1.0f, 1.0f, 1.0f);
         }
 
         long id = requestId.incrementAndGet();
         return new RecalcRequest(id, playerPos, currentDim, sourceDim, simulateHeld,
-            centers, translated, colors, showNeutralBorders, useLinkingAlgorithm);
+            centers, translated, colors, useLinkingAlgorithm);
     }
 
     private void recalcLoop() {
@@ -1671,13 +1677,12 @@ public class VoronoiCalculator {
         final Vec3[] portalCenters;
         final Vec3[] portalTranslated;
         final Vector3f[] portalColors;
-        final boolean showNeutralBorders;
         final boolean useLinkingAlgorithm;
 
         RecalcRequest(long id, Vec3 playerPos, ResourceKey<Level> currentDim,
                       ResourceKey<Level> sourceDim, boolean simulateHeld,
                       Vec3[] portalCenters, Vec3[] portalTranslated, Vector3f[] portalColors,
-                      boolean showNeutralBorders, boolean useLinkingAlgorithm) {
+                      boolean useLinkingAlgorithm) {
             this.id = id;
             this.playerPos = playerPos;
             this.currentDim = currentDim;
@@ -1686,7 +1691,6 @@ public class VoronoiCalculator {
             this.portalCenters = portalCenters;
             this.portalTranslated = portalTranslated;
             this.portalColors = portalColors;
-            this.showNeutralBorders = showNeutralBorders;
             this.useLinkingAlgorithm = useLinkingAlgorithm;
         }
     }

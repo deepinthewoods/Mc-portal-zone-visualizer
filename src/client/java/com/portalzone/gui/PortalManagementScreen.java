@@ -46,6 +46,8 @@ public class PortalManagementScreen extends BaseScreen {
     private int maxScroll = 0;
     private double lastFinitePortalMarkerDrawDistance = 2048.0;
     private boolean wasKeyDown = false;
+    private int queueStatusX = 0;
+    private int queueStatusY = 0;
 
     public PortalManagementScreen(Screen parent) {
         super();
@@ -102,6 +104,11 @@ public class PortalManagementScreen extends BaseScreen {
         this.addWidget(discoveryCheckbox);
         y += 15;
 
+        // Store position for queue status (will be drawn directly)
+        queueStatusX = x + 12;
+        queueStatusY = y;
+        y += 15;
+
         // Borders checkbox
         WidgetCheckBox bordersCheckbox = new WidgetCheckBox(
             x,
@@ -113,19 +120,6 @@ public class PortalManagementScreen extends BaseScreen {
         bordersCheckbox.setChecked(manager.isBordersAlwaysVisible());
         bordersCheckbox.setListener((checkBox) -> manager.setBordersAlwaysVisible(checkBox.isChecked()));
         this.addWidget(bordersCheckbox);
-        y += 15;
-
-        // Neutral borders checkbox
-        WidgetCheckBox neutralBordersCheckbox = new WidgetCheckBox(
-            x,
-            y,
-            MaLiLibIcons.MINUS,
-            MaLiLibIcons.PLUS,
-            "Show Grey Borders"
-        );
-        neutralBordersCheckbox.setChecked(manager.isNeutralBordersEnabled());
-        neutralBordersCheckbox.setListener((checkBox) -> manager.setNeutralBordersEnabled(checkBox.isChecked()));
-        this.addWidget(neutralBordersCheckbox);
         y += 15;
 
         // Show connection lines checkbox
@@ -923,6 +917,13 @@ public class PortalManagementScreen extends BaseScreen {
 
         // Draw title
         graphics.drawCenteredString(this.textRenderer, this.title, this.width / 2, 10, 0xFFFFFFFF);
+
+        // Draw queue status (updated every frame)
+        PortalManager manager = PortalManager.getInstance();
+        int queueSize = manager.getScanQueueSize();
+        int pendingSize = manager.getTotalPendingScans();
+        String queueText = String.format("Scan Queue: %d active, %d pending", queueSize, pendingSize);
+        graphics.drawString(this.textRenderer, queueText, queueStatusX, queueStatusY, 0xFFAAAAAA);
 
         // Draw portal entries with scissor test for scrolling
         int viewportTop = VIEWPORT_TOP;

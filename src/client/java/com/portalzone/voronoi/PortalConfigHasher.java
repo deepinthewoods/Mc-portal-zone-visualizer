@@ -13,7 +13,6 @@ import org.joml.Vector3f;
  *   <li>Portal positions (Vec3 coordinates)</li>
  *   <li>Portal colors (Vector3f RGB values)</li>
  *   <li>Hidden portal states (boolean array)</li>
- *   <li>Neutral borders setting (boolean)</li>
  * </ul>
  *
  * <p>The hash will change whenever:
@@ -22,7 +21,6 @@ import org.joml.Vector3f;
  *   <li>A portal moves to a different position</li>
  *   <li>A portal's color changes</li>
  *   <li>A portal is hidden or unhidden</li>
- *   <li>The neutral borders setting is toggled</li>
  * </ul>
  *
  * <p>The hash will be identical for the same portal configuration, making it
@@ -48,16 +46,12 @@ public class PortalConfigHasher {
      * @param portals Array of portal positions (may be null if no portals)
      * @param colors Array of portal colors (must match portals length if portals not null)
      * @param hidden Array of hidden states for each portal (must match portals length if portals not null)
-     * @param neutralBorders Whether neutral (grey) borders should be rendered
      * @return A 64-bit hash code representing the current portal configuration
      * @throws IllegalArgumentException if arrays have mismatched lengths
      */
     public static long calculatePortalConfigHash(Vec3[] portals, Vector3f[] colors,
-                                                  boolean[] hidden, boolean neutralBorders) {
+                                                  boolean[] hidden) {
         long hash = FNV_OFFSET_BASIS;
-
-        // Hash the neutral borders setting first
-        hash = hashBoolean(hash, neutralBorders);
 
         // Handle null/empty portal arrays
         if (portals == null || portals.length == 0) {
